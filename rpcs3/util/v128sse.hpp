@@ -151,11 +151,6 @@ inline bool v128::operator==(const v128& right) const
 	return _mm_movemask_epi8(v128::eq32(*this, right).vi) == 0xffff;
 }
 
-inline bool v128::operator!=(const v128& right) const
-{
-	return !operator==(right);
-}
-
 // result = (~left) & (right)
 inline v128 v128::andnot(const v128& left, const v128& right)
 {
@@ -179,5 +174,5 @@ inline v128 operator^(const v128& left, const v128& right)
 
 inline v128 operator~(const v128& other)
 {
-	return other ^ v128::from32p(UINT32_MAX); // XOR with ones
+	return other ^ v128::from32p(umax); // XOR with ones
 }

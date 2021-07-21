@@ -74,6 +74,7 @@
     <ClCompile Include="Emu\RSX\VK\VKProgramPipeline.cpp" />
     <ClCompile Include="Emu\RSX\VK\VKQueryPool.cpp" />
     <ClCompile Include="Emu\RSX\VK\VKRenderPass.cpp" />
+    <ClCompile Include="Emu\RSX\VK\VKRenderTargets.cpp" />
     <ClCompile Include="Emu\RSX\VK\VKResolveHelper.cpp" />
     <ClCompile Include="Emu\RSX\VK\VKResourceManager.cpp" />
     <ClCompile Include="Emu\RSX\VK\VKShaderInterpreter.cpp" />
@@ -106,12 +107,12 @@
     <Keyword>Win32Proj</Keyword>
     <RootNamespace>VKGSRender</RootNamespace>
   </PropertyGroup>
-  <Import Project="..\common_default.props" />
+  <Import Project="$(SolutionDir)\buildfiles\msvc\common_default.props" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup>
     <PreferredToolArchitecture>x64</PreferredToolArchitecture>
   </PropertyGroup>
-  <Import Project="..\common_default_macros.props" />
+  <Import Project="$(SolutionDir)\buildfiles\msvc\common_default_macros.props" />
   <PropertyGroup Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <CharacterSet>Unicode</CharacterSet>
@@ -123,19 +124,19 @@
   </ImportGroup>
   <ImportGroup Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
-    <Import Project="..\rpcs3_default.props" />
+    <Import Project="$(SolutionDir)\buildfiles\msvc\rpcs3_default.props" />
   </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <Import Project="..\rpcs3_debug.props" />
+    <Import Project="$(SolutionDir)\buildfiles\msvc\rpcs3_debug.props" />
   </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <Import Project="..\rpcs3_release.props" />
+    <Import Project="$(SolutionDir)\buildfiles\msvc\rpcs3_release.props" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup />
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(VULKAN_SDK)\Include;..\Vulkan\glslang\glslang\Public;..\Vulkan\glslang;..\Vulkan\spirv-tools\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(VULKAN_SDK)\Include;$(SolutionDir)\3rdparty\glslang\glslang\Public;..\3rdparty\glslang\glslang;..\3rdparty\SPIRV\SPIRV-Tools\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">/bigobj %(AdditionalOptions)</AdditionalOptions>
       <Optimization Condition="'$(Configuration)|$(Platform)'=='Release|x64'">MaxSpeed</Optimization>
     </ClCompile>

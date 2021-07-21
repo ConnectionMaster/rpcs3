@@ -20,9 +20,7 @@
 #include "Emu/Cell/SPUDisAsm.h"
 #include "Emu/Cell/SPUAnalyser.h"
 #include "Emu/Cell/SPUThread.h"
-#include "Emu/Cell/SPUInterpreter.h"
 #include "Emu/Cell/SPURecompiler.h"
-#include "Emu/Cell/RawSPUThread.h"
 #include "Emu/Cell/timers.hpp"
 
 #include <cmath>
@@ -370,7 +368,7 @@ namespace spu
 
 std::array<u32, 2> op_branch_targets(u32 pc, spu_opcode_t op)
 {
-	std::array<u32, 2> res{spu_branch_target(pc + 4), UINT32_MAX};
+	std::array<u32, 2> res{spu_branch_target(pc + 4), umax};
 
 	switch (const auto type = s_spu_itype.decode(op.opcode))
 	{
@@ -398,7 +396,7 @@ std::array<u32, 2> op_branch_targets(u32 pc, spu_opcode_t op)
 
 	case spu_itype::UNK:
 	{
-		res[0] = UINT32_MAX;
+		res[0] = umax;
 		break;
 	}
 	default: break;
@@ -1162,9 +1160,9 @@ void spu_int_ctrl_t::set(u64 ints)
 	{
 		std::shared_lock rlock(id_manager::g_mutex);
 
-		if (const auto tag_ptr = tag.lock())
+		if (lv2_obj::check(tag))
 		{
-			if (auto handler = tag_ptr->handler.lock())
+			if (auto handler = tag->handler; lv2_obj::check(handler))
 			{
 				rlock.unlock();
 				handler->exec();
@@ -1678,11 +1676,6 @@ void spu_thread::cleanup()
 	// Deallocate local storage
 	ensure(vm::dealloc(vm_offset(), vm::spu, &shm));
 
-	if (g_cfg.core.mfc_debug)
-	{
-		utils::memory_decommit(vm::g_stat_addr + vm_offset(), SPU_LS_SIZE);
-	}
-
 	// Deallocate RawSPU ID
 	if (get_type() >= spu_type::raw)
 	{
@@ -1715,11 +1708,6 @@ spu_thread::spu_thread(lv2_spu_group* group, u32 index, std::string_view name, u
 	, shm(std::make_shared<utils::shm>(SPU_LS_SIZE))
 	, ls([&]()
 	{
-		if (g_cfg.core.mfc_debug)
-		{
-			utils::memory_commit(vm::g_stat_addr + vm_offset(), SPU_LS_SIZE);
-		}
-
 		if (!group)
 		{
 			ensure(vm::get(vm::spu)->falloc(vm_offset(), SPU_LS_SIZE, &shm, 0x200));
@@ -1791,6 +1779,11 @@ spu_thread::spu_thread(lv2_spu_group* group, u32 index, std::string_view name, u
 	if (get_type() >= spu_type::raw)
 	{
 		cpu_init();
+	}
+
+	if (g_cfg.core.mfc_debug)
+	{
+		mfc_history.resize(max_mfc_dump_idx);
 	}
 
 	range_lock = vm::alloc_range_lock();
@@ -2043,10 +2036,10 @@ void spu_thread::do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8*
 					continue;
 				}
 
-				const auto cpu = static_cast<spu_thread*>(get_current_cpu_thread());
+				const auto cpu = get_current_cpu_thread<spu_thread>();
 
 				alignas(64) u8 temp[128];
-				u8* dst0 = cpu && cpu->id_type() != 1 && (eal & -128) == cpu->raddr ? temp : dst;
+				u8* dst0 = cpu && (eal & -128) == cpu->raddr ? temp : dst;
 
 				if (dst0 == +temp && time0 != cpu->rtime)
 				{
@@ -2126,7 +2119,7 @@ void spu_thread::do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8*
 			{
 				if (g_cfg.core.mfc_debug && _this)
 				{
-					auto& dump = reinterpret_cast<mfc_cmd_dump*>(vm::g_stat_addr + _this->vm_offset())[_this->mfc_dump_idx++ % spu_thread::max_mfc_dump_idx];
+					auto& dump = _this->mfc_history[_this->mfc_dump_idx++ % spu_thread::max_mfc_dump_idx];
 					dump.cmd = args;
 					dump.cmd.eah = _this->pc;
 					std::memcpy(dump.data, is_get ? dst : src, std::min<u32>(args.size, 128));
@@ -2324,7 +2317,7 @@ void spu_thread::do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8*
 
 			if (g_cfg.core.mfc_debug && _this)
 			{
-				auto& dump = reinterpret_cast<mfc_cmd_dump*>(vm::g_stat_addr + _this->vm_offset())[_this->mfc_dump_idx++ % spu_thread::max_mfc_dump_idx];
+				auto& dump = _this->mfc_history[_this->mfc_dump_idx++ % spu_thread::max_mfc_dump_idx];
 				dump.cmd = args;
 				dump.cmd.eah = _this->pc;
 				std::memcpy(dump.data, is_get ? dst : src, std::min<u32>(args.size, 128));
@@ -2471,7 +2464,7 @@ void spu_thread::do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8*
 
 		if (g_cfg.core.mfc_debug && _this)
 		{
-			auto& dump = reinterpret_cast<mfc_cmd_dump*>(vm::g_stat_addr + _this->vm_offset())[_this->mfc_dump_idx++ % spu_thread::max_mfc_dump_idx];
+			auto& dump = _this->mfc_history[_this->mfc_dump_idx++ % spu_thread::max_mfc_dump_idx];
 			dump.cmd = args;
 			dump.cmd.eah = _this->pc;
 			std::memcpy(dump.data, is_get ? dst : src, std::min<u32>(args.size, 128));
@@ -2540,7 +2533,7 @@ plain_access:
 
 	if (g_cfg.core.mfc_debug && _this)
 	{
-		auto& dump = reinterpret_cast<mfc_cmd_dump*>(vm::g_stat_addr + _this->vm_offset())[_this->mfc_dump_idx++ % spu_thread::max_mfc_dump_idx];
+		auto& dump = _this->mfc_history[_this->mfc_dump_idx++ % spu_thread::max_mfc_dump_idx];
 		dump.cmd = args;
 		dump.cmd.eah = _this->pc;
 		std::memcpy(dump.data, is_get ? dst : src, std::min<u32>(args.size, 128));
@@ -2730,7 +2723,7 @@ bool spu_thread::do_putllc(const spu_mfc_cmd& args)
 		{
 			switch (u64 count = spu_putllc_tx(addr, rtime, rdata, to_write))
 			{
-			case UINT64_MAX:
+			case umax:
 			{
 				auto& data = *vm::get_super_ptr<spu_rdata_t>(addr);
 
@@ -3106,7 +3099,7 @@ bool spu_thread::is_exec_code(u32 addr) const
 	return true;
 }
 
-u32 spu_thread::get_mfc_completed()
+u32 spu_thread::get_mfc_completed() const
 {
 	return ch_tag_mask & ~mfc_fence;
 }
@@ -3123,7 +3116,7 @@ bool spu_thread::process_mfc_cmd()
 			return false;
 		}
 
-		thread_ctrl::wait_on(state, old);;
+		thread_ctrl::wait_on(state, old);
 	}
 
 	spu::scheduler::concurrent_execution_watchdog watchdog(*this);
@@ -3291,7 +3284,7 @@ bool spu_thread::process_mfc_cmd()
 
 		if (g_cfg.core.mfc_debug)
 		{
-			auto& dump = reinterpret_cast<mfc_cmd_dump*>(vm::g_stat_addr + vm_offset())[mfc_dump_idx++ % spu_thread::max_mfc_dump_idx];
+			auto& dump = mfc_history[mfc_dump_idx++ % spu_thread::max_mfc_dump_idx];
 			dump.cmd = ch_mfc_cmd;
 			dump.cmd.eah = pc;
 			std::memcpy(dump.data, rdata, 128);
@@ -3316,7 +3309,7 @@ bool spu_thread::process_mfc_cmd()
 
 		if (dump)
 		{
-			auto& dump = reinterpret_cast<mfc_cmd_dump*>(vm::g_stat_addr + vm_offset())[mfc_dump_idx++ % spu_thread::max_mfc_dump_idx];
+			auto& dump = mfc_history[mfc_dump_idx++ % max_mfc_dump_idx];
 			dump.cmd = ch_mfc_cmd;
 			dump.cmd.eah = pc;
 			dump.cmd.tag = static_cast<u32>(ch_atomic_stat.get_value()); // Use tag as atomic status
@@ -3329,7 +3322,7 @@ bool spu_thread::process_mfc_cmd()
 	{
 		if (g_cfg.core.mfc_debug)
 		{
-			auto& dump = reinterpret_cast<mfc_cmd_dump*>(vm::g_stat_addr + vm_offset())[mfc_dump_idx++ % spu_thread::max_mfc_dump_idx];
+			auto& dump = mfc_history[mfc_dump_idx++ % max_mfc_dump_idx];
 			dump.cmd = ch_mfc_cmd;
 			dump.cmd.eah = pc;
 			std::memcpy(dump.data, _ptr<u8>(ch_mfc_cmd.lsa & 0x3ff80), 128);
@@ -3343,7 +3336,7 @@ bool spu_thread::process_mfc_cmd()
 	{
 		if (g_cfg.core.mfc_debug)
 		{
-			auto& dump = reinterpret_cast<mfc_cmd_dump*>(vm::g_stat_addr + vm_offset())[mfc_dump_idx++ % spu_thread::max_mfc_dump_idx];
+			auto& dump = mfc_history[mfc_dump_idx++ % max_mfc_dump_idx];
 			dump.cmd = ch_mfc_cmd;
 			dump.cmd.eah = pc;
 			std::memcpy(dump.data, _ptr<u8>(ch_mfc_cmd.lsa & 0x3ff80), 128);
@@ -3428,7 +3421,7 @@ bool spu_thread::process_mfc_cmd()
 			//if (g_cfg.core.mfc_debug)
 			//{
 			//  TODO: This needs a disambiguator with list elements dumping
-			//	auto& dump = reinterpret_cast<mfc_cmd_dump*>(vm::g_stat_addr + vm_offset())[mfc_dump_idx++ % spu_thread::max_mfc_dump_idx];
+			//	auto& dump = mfc_history[mfc_dump_idx++ % max_mfc_dump_idx];
 			//	dump.cmd = ch_mfc_cmd;
 			//	dump.cmd.eah = pc;
 			//	std::memcpy(dump.data, _ptr<u8>(ch_mfc_cmd.eah & 0x3fff0), std::min<u32>(ch_mfc_cmd.size, 128));
@@ -3487,7 +3480,7 @@ bool spu_thread::process_mfc_cmd()
 		ch_mfc_cmd.cmd, ch_mfc_cmd.lsa, ch_mfc_cmd.eal, ch_mfc_cmd.tag, ch_mfc_cmd.size);
 }
 
-bool spu_thread::reservation_check(u32 addr, const decltype(rdata)& data)
+bool spu_thread::reservation_check(u32 addr, const decltype(rdata)& data) const
 {
 	if (!addr)
 	{
@@ -3971,7 +3964,7 @@ bool spu_thread::set_ch_value(u32 ch, u32 value)
 
 				std::lock_guard lock(group->mutex);
 
-				const auto queue = this->spup[spup].lock();
+				const auto queue = this->spup[spup].get();
 
 				const auto res = ch_in_mbox.get_count() ? CELL_EBUSY :
 					!queue ? CELL_ENOTCONN :
@@ -4003,7 +3996,7 @@ bool spu_thread::set_ch_value(u32 ch, u32 value)
 
 				spu_log.trace("sys_spu_thread_throw_event(spup=%d, data0=0x%x, data1=0x%x)", spup, value & 0x00ffffff, data);
 
-				const auto queue = (std::lock_guard{group->mutex}, this->spup[spup].lock());
+				const auto queue = (std::lock_guard{group->mutex}, this->spup[spup]);
 
 				// TODO: check passing spup value
 				if (auto res = queue ? queue->send(SYS_SPU_THREAD_EVENT_USER_KEY, lv2_id, (u64{spup} << 32) | (value & 0x00ffffff), data) : CELL_ENOTCONN)
@@ -4341,16 +4334,12 @@ bool spu_thread::stop_and_signal(u32 code)
 			return ch_in_mbox.set_values(1, CELL_EINVAL), true;
 		}
 
-		std::shared_ptr<lv2_event_queue> queue;
-
 		state += cpu_flag::wait;
 
 		spu_function_logger logger(*this, "sys_spu_thread_receive_event");
 
 		while (true)
 		{
-			queue.reset();
-
 			// Check group status, wait if necessary
 			for (auto _state = +group->run_state;
 				_state >= SPU_THREAD_GROUP_STATUS_WAITING && _state <= SPU_THREAD_GROUP_STATUS_WAITING_AND_SUSPENDED;
@@ -4366,8 +4355,6 @@ bool spu_thread::stop_and_signal(u32 code)
 				thread_ctrl::wait_on(state, old);;
 			}
 
-			reader_lock rlock(id_manager::g_mutex);
-
 			std::lock_guard lock(group->mutex);
 
 			if (is_stopped())
@@ -4381,20 +4368,21 @@ bool spu_thread::stop_and_signal(u32 code)
 				continue;
 			}
 
+			lv2_event_queue* queue = nullptr;
+
 			for (auto& v : this->spuq)
 			{
 				if (spuq == v.first)
 				{
-					queue = v.second.lock();
-
-					if (lv2_event_queue::check(queue))
+					if (lv2_obj::check(v.second))
 					{
+						queue = v.second.get();
 						break;
 					}
 				}
 			}
 
-			if (!lv2_event_queue::check(queue))
+			if (!queue)
 			{
 				return ch_in_mbox.set_values(1, CELL_EINVAL), true;
 			}
@@ -4449,7 +4437,7 @@ bool spu_thread::stop_and_signal(u32 code)
 				break;
 			}
 
-			thread_ctrl::wait_on(state, old);;
+			thread_ctrl::wait_on(state, old);
 		}
 
 		std::lock_guard lock(group->mutex);
@@ -4500,20 +4488,21 @@ bool spu_thread::stop_and_signal(u32 code)
 
 		std::lock_guard lock(group->mutex);
 
-		std::shared_ptr<lv2_event_queue> queue;
+		lv2_event_queue* queue = nullptr;
 
 		for (auto& v : this->spuq)
 		{
 			if (spuq == v.first)
 			{
-				if (queue = v.second.lock(); lv2_event_queue::check(queue))
+				if (lv2_obj::check(v.second))
 				{
+					queue = v.second.get();
 					break;
 				}
 			}
 		}
 
-		if (!lv2_event_queue::check(queue))
+		if (!queue)
 		{
 			return ch_in_mbox.set_values(1, CELL_EINVAL), true;
 		}
@@ -4675,7 +4664,8 @@ void spu_thread::halt()
 		spu_runtime::g_escape(this);
 	}
 
-	fmt::throw_exception("Halt");
+	spu_log.fatal("Halt");
+	spu_runtime::g_escape(this);
 }
 
 void spu_thread::fast_call(u32 ls_addr)
@@ -4792,6 +4782,27 @@ spu_function_logger::spu_function_logger(spu_thread& spu, const char* func)
 {
 	spu.current_func = func;
 	spu.start_time = get_system_time();
+}
+
+spu_thread::thread_name_t::operator std::string() const
+{
+	std::string full_name = fmt::format("%s[0x%07x]", [](spu_type type) -> std::string_view
+	{
+		switch (type)
+		{
+		case spu_type::threaded: return "SPU"sv;
+		case spu_type::raw: return "RawSPU"sv;
+		case spu_type::isolated: return "Iso"sv;
+		default: fmt::throw_exception("Unreachable");
+		}
+	}(_this->get_type()), _this->lv2_id);
+
+	if (const std::string name = *_this->spu_tname.load(); !name.empty())
+	{
+		fmt::append(full_name, " %s", name);
+	}
+
+	return full_name;
 }
 
 template <>

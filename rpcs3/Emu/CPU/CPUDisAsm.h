@@ -1,7 +1,6 @@
 #pragma once
 
 #include <string>
-#include <limits>
 #include "Utilities/StrFmt.h"
 
 enum class cpu_disasm_mode
@@ -18,9 +17,9 @@ class cpu_thread;
 class CPUDisAsm
 {
 protected:
-	const cpu_disasm_mode m_mode;
-	const std::add_pointer_t<const u8> m_offset;
-	const std::add_pointer_t<const cpu_thread> m_cpu;
+	const cpu_disasm_mode m_mode{};
+	const std::add_pointer_t<const u8> m_offset{};
+	const std::add_pointer_t<const cpu_thread> m_cpu{};
 	u32 m_op = 0;
 
 	void Write(const std::string& value)
@@ -62,8 +61,8 @@ protected:
 	}
 
 public:
-	std::string last_opcode;
-	u32 dump_pc;
+	std::string last_opcode{};
+	u32 dump_pc{};
 
 	template <typename T, std::enable_if_t<std::is_base_of_v<CPUDisAsm, T>, int> = 0>
 	static T copy_and_change_mode(const T& dis, cpu_disasm_mode mode)
@@ -79,7 +78,13 @@ protected:
 	{
 	}
 
-	virtual u32 DisAsmBranchTarget(s32 /*imm*/) { return 0; };
+	CPUDisAsm(const CPUDisAsm&) = delete;
+
+	CPUDisAsm& operator=(const CPUDisAsm&) = delete;
+
+	virtual ~CPUDisAsm() = default;
+
+	virtual u32 DisAsmBranchTarget(s32 /*imm*/);
 
 	// TODO: Add builtin fmt helpper for best performance
 	template <typename T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
@@ -87,7 +92,7 @@ protected:
 	{
 		const auto v = static_cast<std::make_signed_t<T>>(value);
 
-		if (v == std::numeric_limits<std::make_signed_t<T>>::min())
+		if (v == smin)
 		{
 			// for INTx_MIN
 			return fmt::format("-0x%x", v);

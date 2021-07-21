@@ -19,6 +19,7 @@ enum class emu_settings_type
 	SPUDebug,
 	MFCDebug,
 	MaxLLVMThreads,
+	PPULLVMPrecompilation,
 	EnableTSX,
 	AccurateGETLLAR,
 	AccurateSpuDMA,
@@ -28,6 +29,7 @@ enum class emu_settings_type
 	AccurateRSXAccess,
 	AccurateXFloat,
 	AccuratePPU128Loop,
+	NumPPUThreads,
 	SetDAZandFTZ,
 	SPUBlockSize,
 	SPUCache,
@@ -37,6 +39,8 @@ enum class emu_settings_type
 	SleepTimersAccuracy,
 	ClocksScale,
 	PerformanceReport,
+	FullWidthAVX512,
+	PPULLVMJavaModeHandling,
 
 	// Graphics
 	Renderer,
@@ -52,7 +56,7 @@ enum class emu_settings_type
 	VSync,
 	DebugOutput,
 	DebugOverlay,
-	LegacyBuffers,
+	RenderdocCompatibility,
 	GPUTextureScaling,
 	StretchToDisplayArea,
 	VulkanAdapter,
@@ -152,11 +156,13 @@ enum class emu_settings_type
 	dev_hdd0Location,
 	dev_hdd1Location,
 	dev_flashLocation,
+	dev_flash2Location,
+	dev_flash3Location,
 	dev_usb000Location,
 };
 
 /** A helper map that keeps track of where a given setting type is located*/
-static const QMap<emu_settings_type, cfg_location> settings_location =
+inline static const QMap<emu_settings_type, cfg_location> settings_location =
 {
 	// Core Tab
 	{ emu_settings_type::PPUDecoder,               { "Core", "PPU Decoder"}},
@@ -170,6 +176,7 @@ static const QMap<emu_settings_type, cfg_location> settings_location =
 	{ emu_settings_type::SPUDebug,                 { "Core", "SPU Debug"}},
 	{ emu_settings_type::MFCDebug,                 { "Core", "MFC Debug"}},
 	{ emu_settings_type::MaxLLVMThreads,           { "Core", "Max LLVM Compile Threads"}},
+	{ emu_settings_type::PPULLVMPrecompilation,    { "Core", "PPU LLVM Precompilation"}},
 	{ emu_settings_type::EnableTSX,                { "Core", "Enable TSX"}},
 	{ emu_settings_type::AccurateGETLLAR,          { "Core", "Accurate GETLLAR"}},
 	{ emu_settings_type::AccurateSpuDMA,           { "Core", "Accurate SPU DMA"}},
@@ -187,6 +194,9 @@ static const QMap<emu_settings_type, cfg_location> settings_location =
 	{ emu_settings_type::ClocksScale,              { "Core", "Clocks scale"}},
 	{ emu_settings_type::AccuratePPU128Loop,       { "Core", "Accurate PPU 128-byte Reservation Op Max Length"}},
 	{ emu_settings_type::PerformanceReport,        { "Core", "Enable Performance Report"}},
+	{ emu_settings_type::FullWidthAVX512,          { "Core", "Full Width AVX-512"}},
+	{ emu_settings_type::NumPPUThreads,            { "Core", "PPU Threads"}},
+	{ emu_settings_type::PPULLVMJavaModeHandling,  { "Core", "PPU LLVM Java Mode Handling"}},
 
 	// Graphics Tab
 	{ emu_settings_type::Renderer,                   { "Video", "Renderer"}},
@@ -202,7 +212,7 @@ static const QMap<emu_settings_type, cfg_location> settings_location =
 	{ emu_settings_type::VSync,                      { "Video", "VSync"}},
 	{ emu_settings_type::DebugOutput,                { "Video", "Debug output"}},
 	{ emu_settings_type::DebugOverlay,               { "Video", "Debug overlay"}},
-	{ emu_settings_type::LegacyBuffers,              { "Video", "Use Legacy OpenGL Buffers"}},
+	{ emu_settings_type::RenderdocCompatibility,     { "Video", "Renderdoc Compatibility Mode"}},
 	{ emu_settings_type::GPUTextureScaling,          { "Video", "Use GPU texture scaling"}},
 	{ emu_settings_type::StretchToDisplayArea,       { "Video", "Stretch To Display Area"}},
 	{ emu_settings_type::ForceHighpZ,                { "Video", "Force High Precision Z buffer"}},
@@ -305,5 +315,7 @@ static const QMap<emu_settings_type, cfg_location> settings_location =
 	{ emu_settings_type::dev_hdd0Location,   { "VFS", "/dev_hdd0/" }},
 	{ emu_settings_type::dev_hdd1Location,   { "VFS", "/dev_hdd1/" }},
 	{ emu_settings_type::dev_flashLocation,  { "VFS", "/dev_flash/"}},
+	{ emu_settings_type::dev_flash2Location, { "VFS", "/dev_flash2/"}},
+	{ emu_settings_type::dev_flash3Location, { "VFS", "/dev_flash3/"}},
 	{ emu_settings_type::dev_usb000Location, { "VFS", "/dev_usb000/"}},
 };

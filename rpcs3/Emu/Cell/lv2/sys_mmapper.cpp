@@ -2,7 +2,6 @@
 #include "sys_mmapper.h"
 
 #include "Emu/Cell/PPUThread.h"
-#include "sys_ppu_thread.h"
 #include "Emu/Cell/lv2/sys_event.h"
 #include "Emu/Memory/vm_var.h"
 #include "sys_memory.h"
@@ -13,10 +12,27 @@
 
 LOG_CHANNEL(sys_mmapper);
 
-lv2_memory::lv2_memory(u32 size, u32 align, u64 flags, lv2_memory_container* ct)
+template <>
+void fmt_class_string<lv2_mem_container_id>::format(std::string& out, u64 arg)
+{
+	format_enum(out, arg, [](auto value)
+	{
+		switch (value)
+		{
+		case SYS_MEMORY_CONTAINER_ID_INVALID: return "Global";
+		}
+
+		// Resort to hex formatting for other values
+		return unknown;
+	});
+}
+
+lv2_memory::lv2_memory(u32 size, u32 align, u64 flags, u64 key, bool pshared, lv2_memory_container* ct)
 	: size(size)
 	, align(align)
 	, flags(flags)
+	, key(key)
+	, pshared(pshared)
 	, ct(ct)
 	, shm(std::make_shared<utils::shm>(size, 1 /* shareable flag */))
 {
@@ -26,17 +42,35 @@ lv2_memory::lv2_memory(u32 size, u32 align, u64 flags, lv2_memory_container* ct)
 #endif
 }
 
-template<> DECLARE(ipc_manager<lv2_memory, u64>::g_ipc) {};
+CellError lv2_memory::on_id_create()
+{
+	if (!exists && !ct->take(size))
+	{
+		return CELL_ENOMEM;
+	}
+
+	exists++;
+	return {};
+}
 
 template <bool exclusive = false>
 error_code create_lv2_shm(bool pshared, u64 ipc_key, u64 size, u32 align, u64 flags, lv2_memory_container* ct)
 {
-	if (auto error = lv2_obj::create<lv2_memory>(pshared ? SYS_SYNC_PROCESS_SHARED : SYS_SYNC_NOT_PROCESS_SHARED, ipc_key, exclusive ? SYS_SYNC_NEWLY_CREATED : SYS_SYNC_NOT_CARE, [&]()
+	const u32 _pshared = pshared ? SYS_SYNC_PROCESS_SHARED : SYS_SYNC_NOT_PROCESS_SHARED;
+
+	if (!pshared)
+	{
+		ipc_key = 0;
+	}
+
+	if (auto error = lv2_obj::create<lv2_memory>(_pshared, ipc_key, exclusive ? SYS_SYNC_NEWLY_CREATED : SYS_SYNC_NOT_CARE, [&]()
 	{
 		return std::make_shared<lv2_memory>(
 			static_cast<u32>(size),
 			align,
 			flags,
+			ipc_key,
+			pshared,
 			ct);
 	}, false))
 	{
@@ -57,7 +91,7 @@ error_code sys_mmapper_allocate_address(ppu_thread& ppu, u64 size, u64 flags, u6
 		return CELL_EALIGN;
 	}
 
-	if (size > UINT32_MAX)
+	if (size > u32{umax})
 	{
 		return CELL_ENOMEM;
 	}
@@ -115,10 +149,10 @@ error_code sys_mmapper_allocate_shared_memory(ppu_thread& ppu, u64 ipc_key, u64 
 	}
 
 	// Check page granularity
-	switch (flags & SYS_MEMORY_PAGE_SIZE_MASK)
+	switch (flags & SYS_MEMORY_GRANULARITY_MASK)
 	{
 	case 0:
-	case SYS_MEMORY_PAGE_SIZE_1M:
+	case SYS_MEMORY_GRANULARITY_1M:
 	{
 		if (size % 0x100000)
 		{
@@ -127,7 +161,7 @@ error_code sys_mmapper_allocate_shared_memory(ppu_thread& ppu, u64 ipc_key, u64 
 
 		break;
 	}
-	case SYS_MEMORY_PAGE_SIZE_64K:
+	case SYS_MEMORY_GRANULARITY_64K:
 	{
 		if (size % 0x10000)
 		{
@@ -145,14 +179,8 @@ error_code sys_mmapper_allocate_shared_memory(ppu_thread& ppu, u64 ipc_key, u64 
 	// Get "default" memory container
 	auto& dct = g_fxo->get<lv2_memory_container>();
 
-	if (!dct.take(size))
-	{
-		return CELL_ENOMEM;
-	}
-
 	if (auto error = create_lv2_shm(ipc_key != SYS_MMAPPER_NO_SHM_KEY, ipc_key, size, flags & SYS_MEMORY_PAGE_SIZE_64K ? 0x10000 : 0x100000, flags, &dct))
 	{
-		dct.used -= size;
 		return error;
 	}
 
@@ -172,10 +200,10 @@ error_code sys_mmapper_allocate_shared_memory_from_container(ppu_thread& ppu, u6
 	}
 
 	// Check page granularity.
-	switch (flags & SYS_MEMORY_PAGE_SIZE_MASK)
+	switch (flags & SYS_MEMORY_GRANULARITY_MASK)
 	{
 	case 0:
-	case SYS_MEMORY_PAGE_SIZE_1M:
+	case SYS_MEMORY_GRANULARITY_1M:
 	{
 		if (size % 0x100000)
 		{
@@ -184,7 +212,7 @@ error_code sys_mmapper_allocate_shared_memory_from_container(ppu_thread& ppu, u6
 
 		break;
 	}
-	case SYS_MEMORY_PAGE_SIZE_64K:
+	case SYS_MEMORY_GRANULARITY_64K:
 	{
 		if (size % 0x10000)
 		{
@@ -199,30 +227,15 @@ error_code sys_mmapper_allocate_shared_memory_from_container(ppu_thread& ppu, u6
 	}
 	}
 
-	const auto ct = idm::get<lv2_memory_container>(cid, [&](lv2_memory_container& ct) -> CellError
-	{
-		// Try to get "physical memory"
-		if (!ct.take(size))
-		{
-			return CELL_ENOMEM;
-		}
-
-		return {};
-	});
+	const auto ct = idm::get<lv2_memory_container>(cid);
 
 	if (!ct)
 	{
 		return CELL_ESRCH;
 	}
 
-	if (ct.ret)
+	if (auto error = create_lv2_shm(ipc_key != SYS_MMAPPER_NO_SHM_KEY, ipc_key, size, flags & SYS_MEMORY_PAGE_SIZE_64K ? 0x10000 : 0x100000, flags, ct.get()))
 	{
-		return ct.ret;
-	}
-
-	if (auto error = create_lv2_shm(ipc_key != SYS_MMAPPER_NO_SHM_KEY, ipc_key, size, flags & SYS_MEMORY_PAGE_SIZE_64K ? 0x10000 : 0x100000, flags, ct.ptr.get()))
-	{
-		ct->used -= size;
 		return error;
 	}
 
@@ -241,9 +254,9 @@ error_code sys_mmapper_allocate_shared_memory_ext(ppu_thread& ppu, u64 ipc_key, 
 		return CELL_EALIGN;
 	}
 
-	switch (flags & SYS_MEMORY_PAGE_SIZE_MASK)
+	switch (flags & SYS_MEMORY_GRANULARITY_MASK)
 	{
-	case SYS_MEMORY_PAGE_SIZE_1M:
+	case SYS_MEMORY_GRANULARITY_1M:
 	case 0:
 	{
 		if (size % 0x100000)
@@ -253,7 +266,7 @@ error_code sys_mmapper_allocate_shared_memory_ext(ppu_thread& ppu, u64 ipc_key, 
 
 		break;
 	}
-	case SYS_MEMORY_PAGE_SIZE_64K:
+	case SYS_MEMORY_GRANULARITY_64K:
 	{
 		if (size % 0x10000)
 		{
@@ -319,14 +332,8 @@ error_code sys_mmapper_allocate_shared_memory_ext(ppu_thread& ppu, u64 ipc_key, 
 	// Get "default" memory container
 	auto& dct = g_fxo->get<lv2_memory_container>();
 
-	if (!dct.take(size))
-	{
-		return CELL_ENOMEM;
-	}
-
 	if (auto error = create_lv2_shm<true>(true, ipc_key, size, flags & SYS_MEMORY_PAGE_SIZE_64K ? 0x10000 : 0x100000, flags, &dct))
 	{
-		dct.used -= size;
 		return error;
 	}
 
@@ -415,30 +422,15 @@ error_code sys_mmapper_allocate_shared_memory_from_container_ext(ppu_thread& ppu
 		}
 	}
 
-	const auto ct = idm::get<lv2_memory_container>(cid, [&](lv2_memory_container& ct) -> CellError
-	{
-		// Try to get "physical memory"
-		if (!ct.take(size))
-		{
-			return CELL_ENOMEM;
-		}
-
-		return {};
-	});
+	const auto ct = idm::get<lv2_memory_container>(cid);
 
 	if (!ct)
 	{
 		return CELL_ESRCH;
 	}
 
-	if (ct.ret)
+	if (auto error = create_lv2_shm<true>(true, ipc_key, size, flags & SYS_MEMORY_PAGE_SIZE_64K ? 0x10000 : 0x100000, flags, ct.get()))
 	{
-		return ct.ret;
-	}
-
-	if (auto error = create_lv2_shm<true>(true, ipc_key, size, flags & SYS_MEMORY_PAGE_SIZE_64K ? 0x10000 : 0x100000, flags, ct.ptr.get()))
-	{
-		ct->used -= size;
 		return error;
 	}
 
@@ -526,6 +518,14 @@ error_code sys_mmapper_free_shared_memory(ppu_thread& ppu, u32 mem_id)
 			return CELL_EBUSY;
 		}
 
+		lv2_obj::on_id_destroy(mem, mem.key, +mem.pshared);
+
+		if (!mem.exists)
+		{
+			// Return "physical memory" to the memory container
+			mem.ct->used -= mem.size;
+		}
+
 		return {};
 	});
 
@@ -538,9 +538,6 @@ error_code sys_mmapper_free_shared_memory(ppu_thread& ppu, u32 mem_id)
 	{
 		return mem.ret;
 	}
-
-	// Return "physical memory" to the memory container
-	mem->ct->used -= mem->size;
 
 	return CELL_OK;
 }

@@ -11,7 +11,15 @@
 
 LOG_CHANNEL(sys_event);
 
-template<> DECLARE(ipc_manager<lv2_event_queue, u64>::g_ipc) {};
+lv2_event_queue::lv2_event_queue(u32 protocol, s32 type, s32 size, u64 name, u64 ipc_key) noexcept
+	: id(idm::last_id())
+	, protocol{static_cast<u8>(protocol)}
+	, type(static_cast<u8>(type))
+	, size(static_cast<u8>(size))
+	, name(name)
+	, key(ipc_key)
+{
+}
 
 std::shared_ptr<lv2_event_queue> lv2_event_queue::find(u64 ipc_key)
 {
@@ -21,26 +29,7 @@ std::shared_ptr<lv2_event_queue> lv2_event_queue::find(u64 ipc_key)
 		return {};
 	}
 
-	auto queue = ipc_manager<lv2_event_queue, u64>::get(ipc_key);
-
-	if (queue && !queue->exists)
-	{
-		queue.reset();
-	}
-
-	return queue;
-}
-
-bool lv2_event_queue::check(const std::weak_ptr<lv2_event_queue>& wkptr)
-{
-	const auto queue = wkptr.lock();
-
-	return queue && queue->exists;
-}
-
-bool lv2_event_queue::check(const std::shared_ptr<lv2_event_queue>& sptr)
-{
-	return sptr && sptr->exists;
+	return g_fxo->get<ipc_manager<lv2_event_queue, u64>>().get(ipc_key);
 }
 
 CellError lv2_event_queue::send(lv2_event event)
@@ -93,11 +82,11 @@ CellError lv2_event_queue::send(lv2_event event)
 	return {};
 }
 
-error_code sys_event_queue_create(cpu_thread& cpu, vm::ptr<u32> equeue_id, vm::ptr<sys_event_queue_attribute_t> attr, u64 event_queue_key, s32 size)
+error_code sys_event_queue_create(cpu_thread& cpu, vm::ptr<u32> equeue_id, vm::ptr<sys_event_queue_attribute_t> attr, u64 ipc_key, s32 size)
 {
 	cpu.state += cpu_flag::wait;
 
-	sys_event.warning("sys_event_queue_create(equeue_id=*0x%x, attr=*0x%x, event_queue_key=0x%llx, size=%d)", equeue_id, attr, event_queue_key, size);
+	sys_event.warning("sys_event_queue_create(equeue_id=*0x%x, attr=*0x%x, ipc_key=0x%llx, size=%d)", equeue_id, attr, ipc_key, size);
 
 	if (size <= 0 || size > 127)
 	{
@@ -120,42 +109,19 @@ error_code sys_event_queue_create(cpu_thread& cpu, vm::ptr<u32> equeue_id, vm::p
 		return CELL_EINVAL;
 	}
 
-	auto queue = std::make_shared<lv2_event_queue>(protocol, type, attr->name_u64, event_queue_key, size);
+	const u32 pshared = ipc_key == SYS_EVENT_QUEUE_LOCAL ? SYS_SYNC_NOT_PROCESS_SHARED : SYS_SYNC_PROCESS_SHARED;
+	constexpr u32 flags = SYS_SYNC_NEWLY_CREATED;
+	const u64 name = attr->name_u64;
 
-	CellError error = CELL_EAGAIN;
-
-	if (event_queue_key == SYS_EVENT_QUEUE_LOCAL)
+	if (const auto error = lv2_obj::create<lv2_event_queue>(pshared, ipc_key, flags, [&]()
 	{
-		// Not an IPC queue
-		if (const u32 _id = idm::import<lv2_obj, lv2_event_queue>([&]() { if ((error = queue->on_id_create())) queue.reset(); return std::move(queue); } ))
-		{
-			*equeue_id = _id;
-			return CELL_OK;
-		}
-
-		return error;
-	}
-
-	// Create IPC queue
-	if (!ipc_manager<lv2_event_queue, u64>::add(event_queue_key, [&]() -> std::shared_ptr<lv2_event_queue>
-	{
-		if (const u32 _id = idm::import<lv2_obj, lv2_event_queue>([&]() { if ((error = queue->on_id_create())) return decltype(queue){}; return queue; } ))
-		{
-			*equeue_id = _id;
-			return std::move(queue);
-		}
-
-		return nullptr;
+		return std::make_shared<lv2_event_queue>(protocol, type, size, name, ipc_key);
 	}))
 	{
-		return CELL_EEXIST;
-	}
-
-	if (queue)
-	{
 		return error;
 	}
 
+	*equeue_id = idm::last_id();
 	return CELL_OK;
 }
 
@@ -179,7 +145,7 @@ error_code sys_event_queue_destroy(ppu_thread& ppu, u32 equeue_id, s32 mode)
 			return CELL_EBUSY;
 		}
 
-		queue.exists--;
+		lv2_obj::on_id_destroy(queue, queue.key);
 		return {};
 	});
 
@@ -249,7 +215,7 @@ error_code sys_event_queue_tryreceive(ppu_thread& ppu, u32 equeue_id, vm::ptr<sy
 	while (queue->sq.empty() && count < size && !queue->events.empty())
 	{
 		auto& dest = event_array[count++];
-		auto event = queue->events.front();
+		const auto event = queue->events.front();
 		queue->events.pop_front();
 
 		std::tie(dest.source, dest.data1, dest.data2, dest.data3) = event;
@@ -276,6 +242,14 @@ error_code sys_event_queue_receive(ppu_thread& ppu, u32 equeue_id, vm::ptr<sys_e
 		}
 
 		std::lock_guard lock(queue.mutex);
+
+		// "/dev_flash/vsh/module/msmw2.sprx" seems to rely on some cryptic shared memory behaviour that we don't emulate correctly
+		// This is a hack to avoid waiting for 1m40s every time we boot vsh
+		if (queue.key == 0x8005911000000012 && g_ps3_process_info.get_cellos_appname() == "vsh.self"sv)
+		{
+			sys_event.todo("sys_event_queue_receive(equeue_id=0x%x, *0x%x, timeout=0x%llx) Bypassing timeout for msmw2.sprx", equeue_id, dummy_event, timeout);
+			timeout = 1;
+		}
 
 		if (queue.events.empty())
 		{
@@ -394,7 +368,7 @@ error_code sys_event_port_destroy(ppu_thread& ppu, u32 eport_id)
 
 	const auto port = idm::withdraw<lv2_obj, lv2_event_port>(eport_id, [](lv2_event_port& port) -> CellError
 	{
-		if (lv2_event_queue::check(port.queue))
+		if (lv2_obj::check(port.queue))
 		{
 			return CELL_EISCONN;
 		}
@@ -435,7 +409,7 @@ error_code sys_event_port_connect_local(cpu_thread& cpu, u32 eport_id, u32 equeu
 		return CELL_EINVAL;
 	}
 
-	if (lv2_event_queue::check(port->queue))
+	if (lv2_obj::check(port->queue))
 	{
 		return CELL_EISCONN;
 	}
@@ -467,12 +441,12 @@ error_code sys_event_port_connect_ipc(ppu_thread& ppu, u32 eport_id, u64 ipc_key
 		return CELL_ESRCH;
 	}
 
-	if (port->type != 3)
+	if (port->type != SYS_EVENT_PORT_IPC)
 	{
 		return CELL_EINVAL;
 	}
 
-	if (lv2_event_queue::check(port->queue))
+	if (lv2_obj::check(port->queue))
 	{
 		return CELL_EISCONN;
 	}
@@ -497,7 +471,7 @@ error_code sys_event_port_disconnect(ppu_thread& ppu, u32 eport_id)
 		return CELL_ESRCH;
 	}
 
-	if (!lv2_event_queue::check(port->queue))
+	if (!lv2_obj::check(port->queue))
 	{
 		return CELL_ENOTCONN;
 	}
@@ -520,11 +494,11 @@ error_code sys_event_port_send(u32 eport_id, u64 data1, u64 data2, u64 data3)
 
 	const auto port = idm::get<lv2_obj, lv2_event_port>(eport_id, [&](lv2_event_port& port) -> CellError
 	{
-		if (const auto queue = port.queue.lock(); lv2_event_queue::check(queue))
+		if (lv2_obj::check(port.queue))
 		{
 			const u64 source = port.name ? port.name : (s64{process_getpid()} << 32) | u64{eport_id};
 
-			return queue->send(source, data1, data2, data3);
+			return port.queue->send(source, data1, data2, data3);
 		}
 
 		return CELL_ENOTCONN;

@@ -4,7 +4,7 @@
 #include "VKHelpers.h"
 #include "vkutils/device.h"
 #include "Emu/system_config.h"
-#include "../Common/GLSLCommon.h"
+#include "../Program/GLSLCommon.h"
 #include "../GCM.h"
 
 std::string VKFragmentDecompilerThread::getFloatTypeName(usz elementCount)
@@ -109,7 +109,7 @@ void VKFragmentDecompilerThread::insertOutputs(std::stringstream & OS)
 		if (m_parr.HasParam(PF_PARAM_NONE, reg_type, table[i].second))
 		{
 			OS << "layout(location=" << std::to_string(output_index++) << ") " << "out vec4 " << table[i].first << ";\n";
-			vk_prog->output_color_masks[i] = UINT32_MAX;
+			vk_prog->output_color_masks[i] = -1;
 		}
 	}
 }
@@ -244,9 +244,11 @@ void VKFragmentDecompilerThread::insertGlobalFunctions(std::stringstream &OS)
 	m_shader_props.require_texture_ops = properties.has_tex_op;
 	m_shader_props.require_shadow_ops = properties.shadow_sampler_mask != 0;
 	m_shader_props.require_texture_expand = properties.has_exp_tex_op;
+	m_shader_props.require_srgb_to_linear = properties.has_upg;
+	m_shader_props.require_linear_to_srgb = properties.has_pkg;
 	m_shader_props.emulate_coverage_tests = g_cfg.video.antialiasing_level == msaa_level::none;
 	m_shader_props.emulate_shadow_compare = device_props.emulate_depth_compare;
-	m_shader_props.low_precision_tests = vk::get_driver_vendor() == vk::driver_vendor::NVIDIA;
+	m_shader_props.low_precision_tests = device_props.has_low_precision_rounding;
 	m_shader_props.disable_early_discard = vk::get_driver_vendor() != vk::driver_vendor::NVIDIA;
 	m_shader_props.supports_native_fp16 = device_props.has_native_half_support;
 
@@ -400,6 +402,7 @@ void VKFragmentProgram::Decompile(const RSXFragmentProgram& prog)
 	}
 
 	decompiler.device_props.emulate_depth_compare = !pdev->get_formats_support().d24_unorm_s8;
+	decompiler.device_props.has_low_precision_rounding = vk::get_driver_vendor() == vk::driver_vendor::NVIDIA;
 	decompiler.Task();
 
 	shader.create(::glsl::program_domain::glsl_fragment_program, source);

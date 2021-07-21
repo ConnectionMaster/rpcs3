@@ -5,7 +5,6 @@
 #include "Emu/Memory/vm.h"
 #include "MFC.h"
 
-#include <map>
 #include "util/v128.hpp"
 #include "util/logs.hpp"
 #include "util/to_endian.hpp"
@@ -354,12 +353,12 @@ public:
 		data.release(u64{count} << off_count | value);
 	}
 
-	u32 get_value()
+	u32 get_value() const
 	{
 		return static_cast<u32>(data);
 	}
 
-	u32 get_count()
+	u32 get_count() const
 	{
 		return static_cast<u32>(data >> off_count);
 	}
@@ -475,7 +474,7 @@ struct spu_int_ctrl_t
 	atomic_t<u64> mask;
 	atomic_t<u64> stat;
 
-	std::weak_ptr<struct lv2_int_tag> tag;
+	std::shared_ptr<struct lv2_int_tag> tag;
 
 	void set(u64 ints);
 
@@ -642,6 +641,11 @@ public:
 
 	spu_thread(lv2_spu_group* group, u32 index, std::string_view name, u32 lv2_id, bool is_isolated = false, u32 option = 0);
 
+	spu_thread(const spu_thread&) = delete;
+	spu_thread& operator=(const spu_thread&) = delete;
+
+	using cpu_thread::operator=;
+
 	u32 pc = 0;
 	u32 dbg_step_pc = 0;
 
@@ -734,15 +738,11 @@ public:
 	atomic_t<status_npc_sync_var> status_npc;
 	std::array<spu_int_ctrl_t, 3> int_ctrl; // SPU Class 0, 1, 2 Interrupt Management
 
-	std::array<std::pair<u32, std::weak_ptr<lv2_event_queue>>, 32> spuq; // Event Queue Keys for SPU Thread
-	std::weak_ptr<lv2_event_queue> spup[64]; // SPU Ports
+	std::array<std::pair<u32, std::shared_ptr<lv2_event_queue>>, 32> spuq; // Event Queue Keys for SPU Thread
+	std::shared_ptr<lv2_event_queue> spup[64]; // SPU Ports
 	spu_channel exit_status{}; // Threaded SPU exit status (not a channel, but the interface fits)
 	atomic_t<u32> last_exit_status; // Value to be written in exit_status after checking group termination
-
-private:
-	lv2_spu_group* const group; // SPU Thread Group (only safe to access in the spu thread itself)
-public:
-
+	lv2_spu_group* const group; // SPU Thread Group (access by the spu threads in the group only! From other threads obtain a shared pointer to group using group ID)
 	const u32 index; // SPU index
 	std::shared_ptr<utils::shm> shm; // SPU memory
 	const std::add_pointer_t<u8> ls; // SPU LS pointer
@@ -770,8 +770,9 @@ public:
 	u64 last_fail = 0;
 	u64 last_succ = 0;
 
+	std::vector<mfc_cmd_dump> mfc_history;
 	u64 mfc_dump_idx = 0;
-	static constexpr u32 max_mfc_dump_idx = SPU_LS_SIZE / sizeof(mfc_cmd_dump);
+	static constexpr u32 max_mfc_dump_idx = 2048;
 
 	std::array<v128, 0x4000> stack_mirror; // Return address information
 
@@ -787,13 +788,13 @@ public:
 	void do_putlluc(const spu_mfc_cmd& args);
 	bool do_putllc(const spu_mfc_cmd& args);
 	void do_mfc(bool wait = true);
-	u32 get_mfc_completed();
+	u32 get_mfc_completed() const;
 
 	bool process_mfc_cmd();
 	ch_events_t get_events(u32 mask_hint = -1, bool waiting = false, bool reading = false);
 	void set_events(u32 bits);
 	void set_interrupt_status(bool enable);
-	bool check_mfc_interrupts(u32 nex_pc);
+	bool check_mfc_interrupts(u32 next_pc);
 	bool is_exec_code(u32 addr) const; // Only a hint, do not rely on it other than debugging purposes
 	u32 get_ch_count(u32 ch);
 	s64 get_ch_value(u32 ch);
@@ -831,7 +832,7 @@ public:
 
 	// Returns true if reservation existed but was just discovered to be lost
 	// It is safe to use on any address, even if not directly accessed by SPU (so it's slower)
-	bool reservation_check(u32 addr, const decltype(rdata)& data);
+	bool reservation_check(u32 addr, const decltype(rdata)& data) const;
 
 	bool read_reg(const u32 addr, u32& value);
 	bool write_reg(const u32 addr, const u32 value);
@@ -848,6 +849,14 @@ public:
 
 		return -1;
 	}
+
+	// For named_thread ctor
+	const struct thread_name_t
+	{
+		const spu_thread* _this;
+
+		operator std::string() const;
+	} thread_name{ this };
 };
 
 class spu_function_logger

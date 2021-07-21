@@ -31,10 +31,10 @@ struct ppu_function
 	u32 stack_frame = 0;
 	u32 trampoline = 0;
 
-	std::map<u32, u32> blocks; // Basic blocks: addr -> size
-	std::set<u32> calls; // Set of called functions
-	std::set<u32> callers;
-	std::string name; // Function name
+	std::map<u32, u32> blocks{}; // Basic blocks: addr -> size
+	std::set<u32> calls{}; // Set of called functions
+	std::set<u32> callers{};
+	std::string name{}; // Function name
 };
 
 // PPU Relocation Information
@@ -80,13 +80,14 @@ struct ppu_module
 	ppu_module& operator=(ppu_module&&) = default;
 
 	uchar sha1[20]{};
-	std::string name;
-	std::string path;
-	std::string cache;
-	std::vector<ppu_reloc> relocs;
-	std::vector<ppu_segment> segs;
-	std::vector<ppu_segment> secs;
-	std::vector<ppu_function> funcs;
+	std::string name{};
+	std::string path{};
+	s64 offset = 0; // Offset of file
+	std::string cache{};
+	std::vector<ppu_reloc> relocs{};
+	std::vector<ppu_segment> segs{};
+	std::vector<ppu_segment> secs{};
+	std::vector<ppu_function> funcs{};
 
 	// Copy info without functions
 	void copy_part(const ppu_module& info)
@@ -1189,7 +1190,7 @@ struct ppu_acontext
 		}
 
 		// Range XOR
-		spec_gpr operator ^(const spec_gpr& rhs)
+		spec_gpr operator ^(const spec_gpr& rhs) const
 		{
 			return (~*this & rhs) | (*this & ~rhs);
 		}

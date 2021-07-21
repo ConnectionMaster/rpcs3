@@ -1,8 +1,8 @@
 #pragma once
 
 // Copyright (C) 2014       Hykem <hykem@hotmail.com>
-// Licensed under the terms of the GNU GPL, version 3
-// http://www.gnu.org/licenses/gpl-3.0.txt
+// Licensed under the terms of the GNU GPL, version 2.0 or later versions.
+// http://www.gnu.org/licenses/gpl-2.0.txt
 
 #include "util/types.hpp"
 
@@ -52,3 +52,4 @@ bool hmac_hash_compare(unsigned char *key, int key_len, unsigned char *in, int i
 void hmac_hash_forge(unsigned char *key, int key_len, unsigned char *in, int in_len, unsigned char *hash);
 bool cmac_hash_compare(unsigned char *key, int key_len, unsigned char *in, int in_len, unsigned char *hash, int hash_len);
 void cmac_hash_forge(unsigned char *key, int key_len, unsigned char *in, int in_len, unsigned char *hash);
+void mbedtls_zeroize(void *v, size_t n);

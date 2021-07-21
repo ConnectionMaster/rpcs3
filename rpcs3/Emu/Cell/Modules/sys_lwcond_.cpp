@@ -3,7 +3,6 @@
 
 #include "Emu/Cell/lv2/sys_lwmutex.h"
 #include "Emu/Cell/lv2/sys_lwcond.h"
-#include "Emu/Cell/lv2/sys_mutex.h"
 #include "Emu/Cell/lv2/sys_cond.h"
 #include "sysPrxForUser.h"
 
@@ -59,7 +58,7 @@ error_code sys_lwcond_signal(ppu_thread& ppu, vm::ptr<sys_lwcond_t> lwcond)
 
 	if ((lwmutex->attribute & SYS_SYNC_ATTR_PROTOCOL_MASK) == SYS_SYNC_RETRY)
 	{
-		return _sys_lwcond_signal(ppu, lwcond->lwcond_queue, 0, UINT32_MAX, 2);
+		return _sys_lwcond_signal(ppu, lwcond->lwcond_queue, 0, u32{umax}, 2);
 	}
 
 	if (lwmutex->vars.owner.load() == ppu.id)
@@ -68,7 +67,7 @@ error_code sys_lwcond_signal(ppu_thread& ppu, vm::ptr<sys_lwcond_t> lwcond)
 		lwmutex->all_info++;
 
 		// call the syscall
-		if (error_code res = _sys_lwcond_signal(ppu, lwcond->lwcond_queue, lwmutex->sleep_queue, UINT32_MAX, 1))
+		if (error_code res = _sys_lwcond_signal(ppu, lwcond->lwcond_queue, lwmutex->sleep_queue, u32{umax}, 1))
 		{
 			if (ppu.test_stopped())
 			{
@@ -96,25 +95,25 @@ error_code sys_lwcond_signal(ppu_thread& ppu, vm::ptr<sys_lwcond_t> lwcond)
 		}
 
 		// call the syscall
-		return _sys_lwcond_signal(ppu, lwcond->lwcond_queue, 0, UINT32_MAX, 2);
+		return _sys_lwcond_signal(ppu, lwcond->lwcond_queue, 0, u32{umax}, 2);
 	}
 
 	// if locking succeeded
-	lwmutex->lock_var.atomic_op([](typename sys_lwmutex_t::sync_var_t& var)
+	lwmutex->lock_var.atomic_op([](sys_lwmutex_t::sync_var_t& var)
 	{
 		var.waiter++;
 		var.owner = lwmutex_reserved;
 	});
 
 	// call the syscall
-	if (error_code res = _sys_lwcond_signal(ppu, lwcond->lwcond_queue, lwmutex->sleep_queue, UINT32_MAX, 3))
+	if (error_code res = _sys_lwcond_signal(ppu, lwcond->lwcond_queue, lwmutex->sleep_queue, u32{umax}, 3))
 	{
 		if (ppu.test_stopped())
 		{
 			return 0;
 		}
 
-		lwmutex->lock_var.atomic_op([&](typename sys_lwmutex_t::sync_var_t& var)
+		lwmutex->lock_var.atomic_op([&](sys_lwmutex_t::sync_var_t& var)
 		{
 			var.waiter--;
 			var.owner = ppu.id;
@@ -253,7 +252,7 @@ error_code sys_lwcond_signal_to(ppu_thread& ppu, vm::ptr<sys_lwcond_t> lwcond, u
 	}
 
 	// if locking succeeded
-	lwmutex->lock_var.atomic_op([](typename sys_lwmutex_t::sync_var_t& var)
+	lwmutex->lock_var.atomic_op([](sys_lwmutex_t::sync_var_t& var)
 	{
 		var.waiter++;
 		var.owner = lwmutex_reserved;
@@ -267,7 +266,7 @@ error_code sys_lwcond_signal_to(ppu_thread& ppu, vm::ptr<sys_lwcond_t> lwcond, u
 			return 0;
 		}
 
-		lwmutex->lock_var.atomic_op([&](typename sys_lwmutex_t::sync_var_t& var)
+		lwmutex->lock_var.atomic_op([&](sys_lwmutex_t::sync_var_t& var)
 		{
 			var.waiter--;
 			var.owner = ppu.id;

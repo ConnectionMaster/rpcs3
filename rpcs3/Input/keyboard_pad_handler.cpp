@@ -78,7 +78,7 @@ void keyboard_pad_handler::Key(const u32 code, bool pressed, u16 value)
 
 	value = Clamp0To255(value);
 
-	for (auto pad : bindings)
+	for (const auto& pad : m_bindings)
 	{
 		for (Button& button : pad->m_buttons)
 		{
@@ -106,7 +106,7 @@ void keyboard_pad_handler::Key(const u32 code, bool pressed, u16 value)
 			}
 		}
 
-		for (int i = 0; i < static_cast<int>(pad->m_sticks.size()); i++)
+		for (usz i = 0; i < pad->m_sticks.size(); i++)
 		{
 			const bool is_max = pad->m_sticks[i].m_keyCodeMax == code;
 			const bool is_min = pad->m_sticks[i].m_keyCodeMin == code;
@@ -131,6 +131,27 @@ void keyboard_pad_handler::Key(const u32 code, bool pressed, u16 value)
 					pad->m_sticks[i].m_value = m_stick_val[i];
 				}
 			}
+		}
+	}
+}
+
+void keyboard_pad_handler::release_all_keys()
+{
+	for (const auto& pad : m_bindings)
+	{
+		for (Button& button : pad->m_buttons)
+		{
+			button.m_pressed = false;
+			button.m_value = 0;
+			button.m_actual_value = 0;
+		}
+
+		for (usz i = 0; i < pad->m_sticks.size(); i++)
+		{
+			m_stick_min[i] = 0;
+			m_stick_max[i] = 128;
+			m_stick_val[i] = 128;
+			pad->m_sticks[i].m_value = 128;
 		}
 	}
 }
@@ -160,6 +181,9 @@ bool keyboard_pad_handler::eventFilter(QObject* target, QEvent* ev)
 			break;
 		case QEvent::Wheel:
 			mouseWheelEvent(static_cast<QWheelEvent*>(ev));
+			break;
+		case QEvent::FocusOut:
+			release_all_keys();
 			break;
 		default:
 			break;
@@ -228,6 +252,9 @@ void keyboard_pad_handler::processKeyEvent(QKeyEvent* event, bool pressed)
 	case Qt::Key_F12:
 		break;
 	case Qt::Key_L:
+		if (event->modifiers() != Qt::AltModifier && event->modifiers() != Qt::ControlModifier)
+			handle_key();
+		break;
 	case Qt::Key_Return:
 		if (event->modifiers() != Qt::AltModifier)
 			handle_key();
@@ -316,7 +343,7 @@ void keyboard_pad_handler::mouseReleaseEvent(QMouseEvent* event)
 	event->ignore();
 }
 
-bool keyboard_pad_handler::get_mouse_lock_state()
+bool keyboard_pad_handler::get_mouse_lock_state() const
 {
 	if (auto game_frame = dynamic_cast<gs_frame*>(m_target))
 		return game_frame->get_mouse_lock_state();
@@ -333,8 +360,6 @@ void keyboard_pad_handler::mouseMoveEvent(QMouseEvent* event)
 
 	static int movement_x = 0;
 	static int movement_y = 0;
-	static int last_pos_x = 0;
-	static int last_pos_y = 0;
 
 	if (m_target && m_target->isActive() && get_mouse_lock_state())
 	{
@@ -358,6 +383,9 @@ void keyboard_pad_handler::mouseMoveEvent(QMouseEvent* event)
 	}
 	else
 	{
+		static int last_pos_x = 0;
+		static int last_pos_y = 0;
+
 		movement_x = event->x() - last_pos_x;
 		movement_y = event->y() - last_pos_y;
 
@@ -388,7 +416,7 @@ void keyboard_pad_handler::mouseMoveEvent(QMouseEvent* event)
 
 		const double a = m_deadzone_x;
 		const double b = m_deadzone_y;
-		const double m = double(movement_y) / double(movement_x);
+		const double m = static_cast<double>(movement_y) / static_cast<double>(movement_x);
 
 		deadzone_x = a * b / std::sqrt(std::pow(a, 2) * std::pow(m, 2) + std::pow(b, 2));
 		deadzone_y = std::abs(m * deadzone_x);
@@ -426,6 +454,11 @@ void keyboard_pad_handler::mouseMoveEvent(QMouseEvent* event)
 
 void keyboard_pad_handler::mouseWheelEvent(QWheelEvent* event)
 {
+	if (!m_mouse_wheel_used)
+	{
+		return;
+	}
+
 	const QPoint direction = event->angleDelta();
 
 	if (direction.isNull())
@@ -473,14 +506,14 @@ std::vector<std::string> keyboard_pad_handler::ListDevices()
 	return list_devices;
 }
 
-std::string keyboard_pad_handler::GetMouseName(const QMouseEvent* event)
+std::string keyboard_pad_handler::GetMouseName(const QMouseEvent* event) const
 {
 	return GetMouseName(event->button());
 }
 
-std::string keyboard_pad_handler::GetMouseName(u32 button)
+std::string keyboard_pad_handler::GetMouseName(u32 button) const
 {
-	if (auto it = mouse_list.find(button); it != mouse_list.end())
+	if (const auto it = mouse_list.find(button); it != mouse_list.cend())
 		return it->second;
 	return "FAIL";
 }
@@ -550,7 +583,7 @@ QStringList keyboard_pad_handler::GetKeyNames(const QKeyEvent* keyEvent)
 std::string keyboard_pad_handler::GetKeyName(const QKeyEvent* keyEvent)
 {
 	// Handle special cases first
-	if (const std::string name = native_scan_code_to_string(keyEvent->nativeScanCode()); !name.empty())
+	if (std::string name = native_scan_code_to_string(keyEvent->nativeScanCode()); !name.empty())
 	{
 		return name;
 	}
@@ -589,20 +622,20 @@ u32 keyboard_pad_handler::GetKeyCode(const QString& keyName)
 {
 	if (keyName.isEmpty())
 		return 0;
-	else if (const int native_scan_code = native_scan_code_from_string(sstr(keyName)); native_scan_code >= 0)
+	if (const int native_scan_code = native_scan_code_from_string(sstr(keyName)); native_scan_code >= 0)
 		return Qt::Key_unknown + native_scan_code; // Special cases that can't be expressed with Qt::Key
-	else if (keyName == "Alt")
+	if (keyName == "Alt")
 		return Qt::Key_Alt;
-	else if (keyName == "AltGr")
+	if (keyName == "AltGr")
 		return Qt::Key_AltGr;
-	else if (keyName == "Shift")
+	if (keyName == "Shift")
 		return Qt::Key_Shift;
-	else if (keyName == "Ctrl")
+	if (keyName == "Ctrl")
 		return Qt::Key_Control;
-	else if (keyName == "Meta")
+	if (keyName == "Meta")
 		return Qt::Key_Meta;
 
-	QKeySequence seq(keyName);
+	const QKeySequence seq(keyName);
 	u32 key_code = 0;
 
 	if (seq.count() == 1)
@@ -619,11 +652,11 @@ int keyboard_pad_handler::native_scan_code_from_string([[maybe_unused]] const st
 #ifdef _WIN32
 	if (key == "Shift Left")
 		return 42;
-	else if (key == "Shift Right")
+	if (key == "Shift Right")
 		return 54;
-	else if (key == "Ctrl Left")
+	if (key == "Ctrl Left")
 		return 29;
-	else if (key == "Ctrl Right")
+	if (key == "Ctrl Right")
 		return 285;
 #else
 		// TODO
@@ -660,13 +693,14 @@ bool keyboard_pad_handler::bindPadToDevice(std::shared_ptr<Pad> pad, const std::
 	if (device != pad::keyboard_device_name)
 		return false;
 
-	const int index = static_cast<int>(bindings.size());
+	const int index = static_cast<int>(m_bindings.size());
 	m_pad_configs[index].load();
 	pad_config* p_profile = &m_pad_configs[index];
 	if (p_profile == nullptr)
 		return false;
 
 	m_mouse_move_used = false;
+	m_mouse_wheel_used = false;
 	m_deadzone_x = p_profile->mouse_deadzone_x;
 	m_deadzone_y = p_profile->mouse_deadzone_y;
 	m_multi_x = p_profile->mouse_acceleration_x / 100.0;
@@ -685,6 +719,8 @@ bool keyboard_pad_handler::bindPadToDevice(std::shared_ptr<Pad> pad, const std::
 			key = 0;
 		else if (!m_mouse_move_used && (key == mouse::move_left || key == mouse::move_right || key == mouse::move_up || key == mouse::move_down))
 			m_mouse_move_used = true;
+		else if (!m_mouse_wheel_used && (key == mouse::wheel_left || key == mouse::wheel_right || key == mouse::wheel_up || key == mouse::wheel_down))
+			m_mouse_wheel_used = true;
 		return key;
 	};
 
@@ -742,23 +778,18 @@ bool keyboard_pad_handler::bindPadToDevice(std::shared_ptr<Pad> pad, const std::
 	pad->m_vibrateMotors.emplace_back(true, 0);
 	pad->m_vibrateMotors.emplace_back(false, 0);
 
-	bindings.push_back(pad);
+	m_bindings.push_back(pad);
 
 	return true;
 }
 
 void keyboard_pad_handler::ThreadProc()
 {
-	static const double mouse_interval = 30.0;
 	static const double stick_interval = 10.0;
 	static const double button_interval = 10.0;
 
 	const auto now = steady_clock::now();
 
-	const double elapsed_left = std::chrono::duration_cast<std::chrono::microseconds>(now - m_last_mouse_move_left).count() / 1000.0;
-	const double elapsed_right = std::chrono::duration_cast<std::chrono::microseconds>(now - m_last_mouse_move_right).count() / 1000.0;
-	const double elapsed_up = std::chrono::duration_cast<std::chrono::microseconds>(now - m_last_mouse_move_up).count() / 1000.0;
-	const double elapsed_down = std::chrono::duration_cast<std::chrono::microseconds>(now - m_last_mouse_move_down).count() / 1000.0;
 	const double elapsed_stick = std::chrono::duration_cast<std::chrono::microseconds>(now - m_stick_time).count() / 1000.0;
 	const double elapsed_button = std::chrono::duration_cast<std::chrono::microseconds>(now - m_button_time).count() / 1000.0;
 
@@ -775,26 +806,36 @@ void keyboard_pad_handler::ThreadProc()
 		m_button_time = now;
 	}
 
-	// roughly 1-2 frames to process the next mouse move
-	if (elapsed_left > mouse_interval)
+	if (m_mouse_move_used)
 	{
-		Key(mouse::move_left, false);
-		m_last_mouse_move_left = now;
-	}
-	if (elapsed_right > mouse_interval)
-	{
-		Key(mouse::move_right, false);
-		m_last_mouse_move_right = now;
-	}
-	if (elapsed_up > mouse_interval)
-	{
-		Key(mouse::move_up, false);
-		m_last_mouse_move_up = now;
-	}
-	if (elapsed_down > mouse_interval)
-	{
-		Key(mouse::move_down, false);
-		m_last_mouse_move_down = now;
+		static const double mouse_interval = 30.0;
+
+		const double elapsed_left  = std::chrono::duration_cast<std::chrono::microseconds>(now - m_last_mouse_move_left).count() / 1000.0;
+		const double elapsed_right = std::chrono::duration_cast<std::chrono::microseconds>(now - m_last_mouse_move_right).count() / 1000.0;
+		const double elapsed_up    = std::chrono::duration_cast<std::chrono::microseconds>(now - m_last_mouse_move_up).count() / 1000.0;
+		const double elapsed_down  = std::chrono::duration_cast<std::chrono::microseconds>(now - m_last_mouse_move_down).count() / 1000.0;
+
+		// roughly 1-2 frames to process the next mouse move
+		if (elapsed_left > mouse_interval)
+		{
+			Key(mouse::move_left, false);
+			m_last_mouse_move_left = now;
+		}
+		if (elapsed_right > mouse_interval)
+		{
+			Key(mouse::move_right, false);
+			m_last_mouse_move_right = now;
+		}
+		if (elapsed_up > mouse_interval)
+		{
+			Key(mouse::move_up, false);
+			m_last_mouse_move_up = now;
+		}
+		if (elapsed_down > mouse_interval)
+		{
+			Key(mouse::move_down, false);
+			m_last_mouse_move_down = now;
+		}
 	}
 
 	const auto get_lerped = [](f32 v0, f32 v1, f32 lerp_factor)
@@ -806,12 +847,12 @@ void keyboard_pad_handler::ThreadProc()
 		return (v0 <= v1) ? std::ceil(res) : std::floor(res);
 	};
 
-	for (uint i = 0; i < bindings.size(); i++)
+	for (uint i = 0; i < m_bindings.size(); i++)
 	{
 		if (last_connection_status[i] == false)
 		{
-			bindings[i]->m_port_status |= CELL_PAD_STATUS_CONNECTED;
-			bindings[i]->m_port_status |= CELL_PAD_STATUS_ASSIGN_CHANGES;
+			m_bindings[i]->m_port_status |= CELL_PAD_STATUS_CONNECTED;
+			m_bindings[i]->m_port_status |= CELL_PAD_STATUS_ASSIGN_CHANGES;
 			last_connection_status[i] = true;
 			connected_devices++;
 		}
@@ -819,25 +860,25 @@ void keyboard_pad_handler::ThreadProc()
 		{
 			if (update_sticks)
 			{
-				for (int j = 0; j < static_cast<int>(bindings[i]->m_sticks.size()); j++)
+				for (int j = 0; j < static_cast<int>(m_bindings[i]->m_sticks.size()); j++)
 				{
 					const f32 stick_lerp_factor = (j < 2) ? m_l_stick_lerp_factor : m_r_stick_lerp_factor;
 
 					// we already applied the following values on keypress if we used factor 1
 					if (stick_lerp_factor < 1.0f)
 					{
-						const f32 v0 = static_cast<f32>(bindings[i]->m_sticks[j].m_value);
+						const f32 v0 = static_cast<f32>(m_bindings[i]->m_sticks[j].m_value);
 						const f32 v1 = static_cast<f32>(m_stick_val[j]);
 						const f32 res = get_lerped(v0, v1, stick_lerp_factor);
 
-						bindings[i]->m_sticks[j].m_value = static_cast<u16>(res);
+						m_bindings[i]->m_sticks[j].m_value = static_cast<u16>(res);
 					}
 				}
 			}
 
 			if (update_buttons)
 			{
-				for (auto& button : bindings[i]->m_buttons)
+				for (auto& button : m_bindings[i]->m_buttons)
 				{
 					if (button.m_analog)
 					{
@@ -868,6 +909,11 @@ void keyboard_pad_handler::ThreadProc()
 				}
 			}
 		}
+	}
+
+	if (!m_mouse_wheel_used)
+	{
+		return;
 	}
 
 	// Releases the wheel buttons 0,1 sec after they've been triggered

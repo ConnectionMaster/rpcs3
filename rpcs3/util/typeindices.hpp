@@ -19,7 +19,7 @@ namespace stx
 	class type_info final : public Info
 	{
 		// Current type id (starts from 0)
-		u32 type = UINT32_MAX;
+		u32 type = umax;
 
 		u32 size = 1;
 		u32 align = 1;
@@ -140,11 +140,6 @@ namespace stx
 			{
 				return ptr == r.ptr;
 			}
-
-			bool operator!=(const const_iterator& r) const
-			{
-				return ptr != r.ptr;
-			}
 		};
 
 		const_iterator begin() const
@@ -255,7 +250,7 @@ namespace stx
 		else
 		{
 			static_assert(sizeof(As) > 0);
-			static_assert(is_same_ptr<T, As>());
+			static_assert(PtrSame<T, As>);
 			return type_counter<Info>::template dyn_type<T, As>.index();
 		}
 	}
@@ -274,7 +269,7 @@ namespace stx
 	ATTR_PURE inline const Info& typedata() noexcept
 	{
 		static_assert(sizeof(T) > 0 && sizeof(As) > 0);
-		static_assert(is_same_ptr<T, As>());
+		static_assert(PtrSame<T, As>); // TODO
 
 		return type_counter<Info>::template dyn_type<T, As>;
 	}

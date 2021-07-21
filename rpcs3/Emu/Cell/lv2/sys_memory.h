@@ -1,12 +1,11 @@
 #pragma once
 
 #include "Emu/Memory/vm_ptr.h"
-#include "Emu/IdManager.h"
 #include "Emu/Cell/ErrorCodes.h"
 
 class cpu_thread;
 
-enum : u32
+enum lv2_mem_container_id : u32
 {
 	SYS_MEMORY_CONTAINER_ID_INVALID = 0xFFFFFFFF,
 };
@@ -26,9 +25,24 @@ enum : u64
 
 enum : u64
 {
-	SYS_MEMORY_PAGE_SIZE_1M   = 0x400ull,
+	SYS_MEMORY_PAGE_SIZE_4K   = 0x100ull,
 	SYS_MEMORY_PAGE_SIZE_64K  = 0x200ull,
+	SYS_MEMORY_PAGE_SIZE_1M   = 0x400ull,
 	SYS_MEMORY_PAGE_SIZE_MASK = 0xf00ull,
+};
+
+enum : u64
+{
+	SYS_MEMORY_GRANULARITY_64K  = 0x0000000000000200,
+	SYS_MEMORY_GRANULARITY_1M   = 0x0000000000000400,
+	SYS_MEMORY_GRANULARITY_MASK = 0x0000000000000f00,
+};
+
+enum : u64
+{
+	SYS_MEMORY_PROT_READ_WRITE = 0x0000000000040000,
+	SYS_MEMORY_PROT_READ_ONLY  = 0x0000000000080000,
+	SYS_MEMORY_PROT_MASK       = 0x00000000000f0000,
 };
 
 struct sys_memory_info_t
@@ -53,12 +67,10 @@ struct lv2_memory_container
 	static const u32 id_count = 16;
 
 	const u32 size; // Amount of "physical" memory in this container
+	const lv2_mem_container_id id; // ID of the container in if placed at IDM, otherwise SYS_MEMORY_CONTAINER_ID_INVALID
 	atomic_t<u32> used{}; // Amount of "physical" memory currently used
 
-	lv2_memory_container(u32 size)
-		: size(size)
-	{
-	}
+	lv2_memory_container(u32 size, bool from_idm = false) noexcept;
 
 	// Try to get specified amount of "physical" memory
 	// Values greater than UINT32_MAX will fail

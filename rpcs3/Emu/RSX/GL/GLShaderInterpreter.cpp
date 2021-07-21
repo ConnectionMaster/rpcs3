@@ -4,8 +4,8 @@
 #include "GLVertexProgram.h"
 #include "GLFragmentProgram.h"
 #include "../rsx_methods.h"
-#include "../Common/ShaderInterpreter.h"
-#include "../Common/GLSLCommon.h"
+#include "../Program/ShaderInterpreter.h"
+#include "../Program/GLSLCommon.h"
 
 namespace gl
 {
@@ -193,11 +193,6 @@ namespace gl
 				rsx_log.fatal("Failed to allocate enough TIUs for shader interpreter.");
 			}
 		}
-
-		[[maybe_unused]] ::glsl::shader_properties properties{};
-		properties.domain = ::glsl::program_domain::glsl_fragment_program;
-		properties.require_depth_conversion = true;
-		properties.require_wpos = true;
 
 		u32 len;
 		ParamArray arr;

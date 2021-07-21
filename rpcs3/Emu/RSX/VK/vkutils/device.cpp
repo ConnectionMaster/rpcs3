@@ -58,6 +58,7 @@ namespace vk
 		conditional_render_support       = device_extensions.is_supported(VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME);
 		external_memory_host_support     = device_extensions.is_supported(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
 		unrestricted_depth_range_support = device_extensions.is_supported(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
+		debug_utils_support              = instance_extensions.is_supported(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 		surface_capabilities_2_support   = instance_extensions.is_supported(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
 	}
 
@@ -69,7 +70,7 @@ namespace vk
 		vkGetPhysicalDeviceMemoryProperties(pdev, &memory_properties);
 		get_physical_device_features(allow_extensions);
 
-		rsx_log.always("Found vulkan-compatible GPU: '%s' running on driver %s", get_name(), get_driver_version());
+		rsx_log.always()("Found vulkan-compatible GPU: '%s' running on driver %s", get_name(), get_driver_version());
 
 		if (get_driver_vendor() == driver_vendor::RADV && get_name().find("LLVM 8.0.0") != umax)
 		{
@@ -191,7 +192,7 @@ namespace vk
 		return count;
 	}
 
-	VkQueueFamilyProperties physical_device::get_queue_properties(u32 queue)
+	const VkQueueFamilyProperties& physical_device::get_queue_properties(u32 queue)
 	{
 		if (queue_props.empty())
 		{
@@ -207,12 +208,12 @@ namespace vk
 		return queue_props[queue];
 	}
 
-	VkPhysicalDeviceMemoryProperties physical_device::get_memory_properties() const
+	const VkPhysicalDeviceMemoryProperties& physical_device::get_memory_properties() const
 	{
 		return memory_properties;
 	}
 
-	VkPhysicalDeviceLimits physical_device::get_limits() const
+	const VkPhysicalDeviceLimits& physical_device::get_limits() const
 	{
 		return props.limits;
 	}
@@ -319,14 +320,6 @@ namespace vk
 		if (g_cfg.video.antialiasing_level != msaa_level::none)
 		{
 			// MSAA features
-			if (!pgpu->features.shaderStorageImageMultisample || !pgpu->features.shaderStorageImageWriteWithoutFormat)
-			{
-				// TODO: Slow fallback to emulate this
-				// Just warn and let the driver decide whether to crash or not
-				rsx_log.fatal("Your GPU driver does not support some required MSAA features. Expect problems.");
-				message_on_error += "Your GPU driver does not support some required MSAA features.\nTry updating your GPU driver or disable Anti-Aliasing in the settings.";
-			}
-
 			enabled_features.sampleRateShading = VK_TRUE;
 			enabled_features.alphaToOne = VK_TRUE;
 			enabled_features.shaderStorageImageMultisample = VK_TRUE;
@@ -343,41 +336,56 @@ namespace vk
 		enabled_features.shaderStorageBufferArrayDynamicIndexing = VK_TRUE;
 
 		// If we're on lavapipe / llvmpipe, disable unimplemented features:
-		// - samplerAnisotropy
 		// - shaderStorageBufferArrayDynamicIndexing
-		// - wideLines
 		// as of mesa 21.1.0-dev (aea36ee05e9, 2020-02-10)
 		// Several games work even if we disable these, testing purpose only
 		if (pgpu->get_name().find("llvmpipe") != umax)
 		{
-			if (!pgpu->features.samplerAnisotropy)
-			{
-				rsx_log.error("Running lavapipe without support for samplerAnisotropy");
-				enabled_features.samplerAnisotropy = VK_FALSE;
-			}
 			if (!pgpu->features.shaderStorageBufferArrayDynamicIndexing)
 			{
 				rsx_log.error("Running lavapipe without support for shaderStorageBufferArrayDynamicIndexing");
 				enabled_features.shaderStorageBufferArrayDynamicIndexing = VK_FALSE;
 			}
-			if (!pgpu->features.wideLines)
-			{
-				rsx_log.error("Running lavapipe without support for wideLines");
-				enabled_features.wideLines = VK_FALSE;
-			}
 		}
 
 		// Optionally disable unsupported stuff
+		if (!pgpu->features.shaderStorageImageMultisample || !pgpu->features.shaderStorageImageWriteWithoutFormat)
+		{
+			// Disable MSAA if any of these two features are unsupported
+			if (g_cfg.video.antialiasing_level != msaa_level::none)
+			{
+				rsx_log.error("Your GPU driver does not support some required MSAA features. MSAA will be disabled.");
+				g_cfg.video.antialiasing_level.set(msaa_level::none);
+			}
+
+			enabled_features.sampleRateShading = VK_FALSE;
+			enabled_features.alphaToOne = VK_FALSE;
+			enabled_features.shaderStorageImageMultisample = VK_FALSE;
+			enabled_features.shaderStorageImageWriteWithoutFormat = VK_FALSE;
+		}
+
+		if (!pgpu->features.samplerAnisotropy)
+		{
+			rsx_log.error("Your GPU does not support anisotropic filtering. Graphics may not render correctly.");
+			enabled_features.samplerAnisotropy = VK_FALSE;
+		}
+
 		if (!pgpu->features.shaderFloat64)
 		{
-			rsx_log.error("Your GPU does not support double precision floats in shaders. Graphics may not work correctly.");
+			rsx_log.error("Your GPU does not support double precision floats in shaders. Graphics may not render correctly.");
 			enabled_features.shaderFloat64 = VK_FALSE;
 		}
 
 		if (!pgpu->features.depthBounds)
 		{
-			rsx_log.error("Your GPU does not support depth bounds testing. Graphics may not work correctly.");
+			rsx_log.error("Your GPU does not support depth bounds testing. Graphics may not render correctly.");
 			enabled_features.depthBounds = VK_FALSE;
+		}
+
+		if (!pgpu->features.wideLines)
+		{
+			rsx_log.error("Your GPU does not support wide lines. Graphics may not render correctly.");
+			enabled_features.wideLines = VK_FALSE;
 		}
 
 		if (!pgpu->features.sampleRateShading && enabled_features.sampleRateShading)
@@ -425,7 +433,7 @@ namespace vk
 		vkGetDeviceQueue(dev, graphics_queue_idx, 0, &m_graphics_queue);
 		vkGetDeviceQueue(dev, transfer_queue_idx, transfer_queue_sub_index, &m_transfer_queue);
 
-		if (present_queue_idx != UINT32_MAX)
+		if (present_queue_idx != umax)
 		{
 			vkGetDeviceQueue(dev, present_queue_idx, 0, &m_present_queue);
 		}
@@ -435,6 +443,13 @@ namespace vk
 		{
 			_vkCmdBeginConditionalRenderingEXT = reinterpret_cast<PFN_vkCmdBeginConditionalRenderingEXT>(vkGetDeviceProcAddr(dev, "vkCmdBeginConditionalRenderingEXT"));
 			_vkCmdEndConditionalRenderingEXT = reinterpret_cast<PFN_vkCmdEndConditionalRenderingEXT>(vkGetDeviceProcAddr(dev, "vkCmdEndConditionalRenderingEXT"));
+		}
+
+		if (pgpu->debug_utils_support)
+		{
+			_vkSetDebugUtilsObjectNameEXT = reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(vkGetDeviceProcAddr(dev, "vkSetDebugUtilsObjectNameEXT"));
+			_vkQueueInsertDebugUtilsLabelEXT = reinterpret_cast<PFN_vkQueueInsertDebugUtilsLabelEXT>(vkGetDeviceProcAddr(dev, "vkQueueInsertDebugUtilsLabelEXT"));
+			_vkCmdInsertDebugUtilsLabelEXT = reinterpret_cast<PFN_vkCmdInsertDebugUtilsLabelEXT>(vkGetDeviceProcAddr(dev, "vkCmdInsertDebugUtilsLabelEXT"));
 		}
 
 		memory_map = vk::get_memory_mapping(pdev);
@@ -577,6 +592,16 @@ namespace vk
 		return pgpu->features.alphaToOne != VK_FALSE;
 	}
 
+	bool render_device::get_anisotropic_filtering_support() const
+	{
+		return pgpu->features.samplerAnisotropy != VK_FALSE;
+	}
+
+	bool render_device::get_wide_lines_support() const
+	{
+		return pgpu->features.wideLines != VK_FALSE;
+	}
+
 	bool render_device::get_conditional_render_support() const
 	{
 		return pgpu->conditional_render_support;
@@ -595,6 +620,11 @@ namespace vk
 	bool render_device::get_surface_capabilities_2_support() const
 	{
 		return pgpu->surface_capabilities_2_support;
+	}
+
+	bool render_device::get_debug_utils_support() const
+	{
+		return g_cfg.video.renderdoc_compatiblity && pgpu->debug_utils_support;
 	}
 
 	mem_allocator_base* render_device::get_allocator() const
@@ -617,10 +647,9 @@ namespace vk
 		memory_type_mapping result;
 		result.device_local = VK_MAX_MEMORY_TYPES;
 		result.host_visible_coherent = VK_MAX_MEMORY_TYPES;
-
+		result.device_local_total_bytes = 0;
+		result.host_visible_total_bytes = 0;
 		bool host_visible_cached = false;
-		VkDeviceSize host_visible_vram_size = 0;
-		VkDeviceSize device_local_vram_size = 0;
 
 		for (u32 i = 0; i < memory_properties.memoryTypeCount; i++)
 		{
@@ -629,10 +658,10 @@ namespace vk
 			bool is_device_local = !!(memory_properties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 			if (is_device_local)
 			{
-				if (device_local_vram_size < heap.size)
+				if (result.device_local_total_bytes < heap.size)
 				{
 					result.device_local = i;
-					device_local_vram_size = heap.size;
+					result.device_local_total_bytes = heap.size;
 				}
 			}
 
@@ -642,10 +671,10 @@ namespace vk
 
 			if (is_host_coherent && is_host_visible)
 			{
-				if ((is_cached && !host_visible_cached) || (host_visible_vram_size < heap.size))
+				if ((is_cached && !host_visible_cached) || (result.host_visible_total_bytes < heap.size))
 				{
 					result.host_visible_coherent = i;
-					host_visible_vram_size = heap.size;
+					result.host_visible_total_bytes = heap.size;
 					host_visible_cached = is_cached;
 				}
 			}

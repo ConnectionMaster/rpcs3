@@ -33,11 +33,14 @@ private:
 	void UpdateProgress(int progress, bool disable = false);
 #endif
 
+	QRect m_initial_geometry;
+
 	std::shared_ptr<gui_settings> m_gui_settings;
 	QTimer m_mousehide_timer;
 
 	u64 m_frames = 0;
-	QString m_window_title;
+	std::string m_window_title;
+	QWindow::Visibility m_last_visibility = Visibility::Windowed;
 	atomic_t<bool> m_show_mouse = true;
 	bool m_disable_mouse = false;
 	bool m_disable_kb_hotkeys = false;
@@ -48,7 +51,7 @@ private:
 	bool m_flip_showed_frame = false;
 
 public:
-	gs_frame(const QRect& geometry, const QIcon& appIcon, const std::shared_ptr<gui_settings>& gui_settings);
+	explicit gs_frame(QScreen* screen, const QRect& geometry, const QIcon& appIcon, std::shared_ptr<gui_settings> gui_settings);
 	~gs_frame();
 
 	draw_context_t make_context() override;
@@ -68,11 +71,11 @@ public:
 	*/
 	bool get_mouse_lock_state();
 
-	void take_screenshot(const std::vector<u8> sshot_data, const u32 sshot_width, const u32 sshot_height, bool is_bgra) override;
+	void take_screenshot(std::vector<u8> data, const u32 sshot_width, const u32 sshot_height, bool is_bgra) override;
 
 protected:
 	virtual void paintEvent(QPaintEvent *event);
-	virtual void showEvent(QShowEvent *event) override;
+	void showEvent(QShowEvent *event) override;
 
 	void keyPressEvent(QKeyEvent *keyEvent) override;
 
@@ -88,6 +91,7 @@ protected:
 	void flip(draw_context_t context, bool skip_frame = false) override;
 	int client_width() override;
 	int client_height() override;
+	double client_device_pixel_ratio() const override;
 
 	bool event(QEvent* ev) override;
 

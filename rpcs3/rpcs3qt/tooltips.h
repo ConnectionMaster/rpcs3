@@ -58,6 +58,7 @@ public:
 		const QString ppu_precise               = tr("Interprets PPU code with absolute accuracy.\nThis is the most accurate Interpreter, but very slow to play games with.\nYou may try this as a last resort if you encounter odd bugs or crashes.\nIf unsure, use PPU Interpreter Fast or PPU Recompiler (LLVM).");
 		const QString ppu_fast                  = tr("Interprets PPU code with sacrificed accuracy in order to achieve better performance.\nThis is the fastest interpreter.\nIt very rarely breaks games even in comparison to the Precise option.\nTry this if PPU Recompiler (LLVM) fails.");
 		const QString ppu_llvm                  = tr("Recompiles and caches the game's PPU code using the LLVM Recompiler once before running it for the first time.\nThis is by far the fastest option and should always be used.\nShould you face compatibility issues, fall back to one of the Interpreters and retry.\nIf unsure, use this option.");
+		const QString ppu_precompilation        = tr("Searches the game's directory and precompiles extra PPU modules during boot.\nIf disabled, these modules will only be compiled when needed. Depending on the game, this might interrupt the gameplay unexpectedly and possibly frequently.\nOnly disable this if you want to get ingame more quickly.");
 		const QString spu_precise               = tr("Interprets SPU code with absolute accuracy.\nThis is extremely slow but may fix broken graphics in some games.");
 		const QString spu_fast                  = tr("Interprets SPU code with sacrificed accuracy in order to achieve better performance.\nThis is slower than the SPU Recompiler but significantly faster than the precise interpreter.\nGames rarely need this however.");
 		const QString spu_asmjit                = tr("Recompiles the game's SPU code using the ASMJIT Recompiler.\nThis is the fast option with very good compatibility.\nIf unsure, use this option.");
@@ -70,6 +71,7 @@ public:
 		const QString enable_tsx                = tr("Enable usage of TSX instructions.\nNeeds to be forced on some Haswell or Broadwell CPUs.\nForcing this on older Hardware can lead to system instability, use it with caution.");
 		const QString spu_block_size            = tr("This option controls the SPU analyser, particularly the size of compiled units. The Mega and Giga modes may improve performance by tying smaller units together, decreasing the number of compiled units but increasing their size.\nUse the Safe mode for maximum compatibility.");
 		const QString preferred_spu_threads     = tr("Some SPU stages are sensitive to race conditions and allowing a limited number at a time helps alleviate performance stalls.\nSetting this to a smaller value might improve performance and reduce stuttering in some games.\nLeave this on auto if performance is negatively affected when setting a small value.");
+		const QString full_width_avx512         = tr("Enables the use of code with full width AVX-512.\nThis code can be executed much faster, but may cause a loss in performance if your CPU model experiences downclocking on wide AVX-512 loads.\nNote that AVX-512 instructions will be used regardless of this option, just at 128 and 256 bit width.");
 
 		// debug
 
@@ -84,7 +86,7 @@ public:
 		const QString accurate_vector_nan          = tr("Forces the floating point NaN (Not A Number) values outputted from PPU vector instructions to be accurate to the real hardware. (0x7FC00000)");
 		const QString accurate_rsx_access          = tr("Forces RSX pauses on SPU MFC_GETLLAR and SPU MFC_PUTLLUC operations.");
 		const QString hook_static_functions        = tr("Allows to hook some functions like 'memcpy' replacing them with high-level implementations. May do nothing or break things. Experimental.");
-		const QString gl_legacy_buffers            = tr("Enables use of classic OpenGL buffers which allows capturing tools to work with RPCS3 e.g RenderDoc.\nIf unsure, don't use this option.");
+		const QString renderdoc_compatibility      = tr("Enables use of classic OpenGL buffers which allows capturing tools to work with RPCS3 e.g RenderDoc.\nAlso allows vulkan to use debug markers for nicer Renderdoc captures.\nIf unsure, don't use this option.");
 		const QString force_high_pz                = tr("Only useful when debugging differences in GPU hardware.\nNot necessary for average users.\nIf unsure, don't use this option.");
 		const QString debug_output                 = tr("Enables the selected API's inbuilt debugging functionality.\nWill cause severe performance degradation especially with Vulkan.\nOnly useful to developers.\nIf unsure, don't use this option.");
 		const QString debug_overlay                = tr("Provides a graphical overlay of various debugging information.\nIf unsure, don't use this option.");
@@ -99,6 +101,8 @@ public:
 		const QString enable_3d                    = tr("Enables 3D stereo rendering.\nNote that only anaglyph viewing is supported at the moment.");
 		const QString accurate_ppu_128_loop        = tr("When enabled, PPU atomic operations will operate on entire cache line data, as opposed to a single 64bit block of memory when disabled.\nNumerical values control whether or not to enable the accurate version based on the atomic operation's length.");
 		const QString enable_performance_report    = tr("Measure certain events and print a chart after the emulator is stopped. Don't enable if not asked to.");
+		const QString num_ppu_threads              = tr("Affects maximum amount of PPU threads running concurrently, the value of 1 has very low compatibility with games.\n2 is the default, if unsure do not modify this setting.");
+		const QString ppu_llvm_java_mode_handling  = tr("Respect current Java Mode for alti-vec ops by PPU LLVM.\nIf unsure do not modify this setting.");
 
 		// emulator
 
@@ -124,7 +128,7 @@ public:
 		const QString perf_overlay_frametime_datapoints    = tr("Sets the amount of datapoints used in the frametime graph.");
 		const QString perf_overlay_position                = tr("Sets the on-screen position (quadrant) of the performance overlay.");
 		const QString perf_overlay_detail_level            = tr("Controls the amount of information displayed on the performance overlay.");
-		const QString perf_overlay_update_interval         = tr("Sets the time interval in which the performance overlay is being updated (measured in milliseconds).");
+		const QString perf_overlay_update_interval         = tr("Sets the time interval in which the performance overlay is being updated (measured in milliseconds).\nSetting this to 16 milliseconds will refresh the performance overlay at roughly 60Hz.\nThe performance overlay refresh rate does not affect the frame graph statistics and can only be as fast as the current game allows.");
 		const QString perf_overlay_font_size               = tr("Sets the font size of the performance overlay (measured in pixels).");
 		const QString perf_overlay_opacity                 = tr("Sets the opacity of the performance overlay (measured in %).");
 		const QString perf_overlay_margin_x                = tr("Sets the horizontal distance to the screen border relative to the screen quadrant (measured in pixels).");
@@ -219,9 +223,9 @@ public:
 		const QString ds4_windows = tr("If you have any issues with the DualShock 4 handler, it might be caused by third-party tools such as DS4Windows. It's recommended that you disable them while using this handler.");
 		const QString ds4_linux   = tr("In order to use the DualShock 4 handler, you might need to add udev rules to let RPCS3 access the controller.<br>See the <a href=\"https://wiki.rpcs3.net/index.php?title=Help:Controller_Configuration\">RPCS3 Wiki</a> for instructions.");
 		const QString ds4_other   = tr("The DualShock 4 handler is recommended for official DualShock 4 controllers.");
-		const QString dualsense_windows = tr("The DualSense handler is recommended for official DualSense controllers.<br><br>Battery settings are not supported yet.");
-		const QString dualsense_linux   = tr("The DualSense handler is recommended for official DualSense controllers.<br><br>Battery settings are not supported yet.");
-		const QString dualsense_other   = tr("The DualSense handler is recommended for official DualSense controllers.<br><br>Battery settings are not supported yet.");
+		const QString dualsense_windows = tr("The DualSense handler is recommended for official DualSense controllers.");
+		const QString dualsense_linux   = tr("The DualSense handler is recommended for official DualSense controllers.");
+		const QString dualsense_other   = tr("The DualSense handler is recommended for official DualSense controllers.");
 		const QString xinput      = tr("The XInput handler will work with Xbox controllers and many third-party PC-compatible controllers. Pressure sensitive buttons from SCP are supported when SCP's XInput1_3.dll is placed in the main RPCS3 directory. For more details, see the <a href=\"https://wiki.rpcs3.net/index.php?title=Help:Controller_Configuration\">RPCS3 Wiki</a>.");
 		const QString evdev       = tr("The evdev handler should work with any controller that has linux support.<br>If your joystick is not being centered properly, read the <a href=\"https://wiki.rpcs3.net/index.php?title=Help:Controller_Configuration\">RPCS3 Wiki</a> for instructions.");
 		const QString mmjoy       = tr("The MMJoystick handler should work with almost any controller recognized by Windows. However, it is recommended that you use the more specific handlers if you have a controller that supports them.");

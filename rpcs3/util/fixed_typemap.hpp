@@ -8,17 +8,60 @@
 #include <utility>
 #include <type_traits>
 
+enum class thread_state : u32;
+
 namespace stx
 {
 	// Simplified typemap with exactly one object of each used type, non-moveable. Initialized on init(). Destroyed on clear().
 	template <typename Tag /*Tag should be unique*/, u32 Size = 0, u32 Align = (Size ? 64 : __STDCPP_DEFAULT_NEW_ALIGNMENT__)>
 	class alignas(Align) manual_typemap
 	{
-		// Save default constructor and destructor
+		static constexpr std::string_view parse_type(std::string_view pretty_name)
+		{
+#ifdef _MSC_VER
+			const auto pos = pretty_name.find("::typeinfo::make_typeinfo<");
+			const auto end = pretty_name.rfind(">(void)");
+			return pretty_name.substr(pos + 26, end - pos - 26);
+#else
+			const auto pos = pretty_name.find("T = ");
+
+			if (pos + 1)
+			{
+				pretty_name.remove_prefix(pos + 4);
+
+				auto end = pretty_name.find("; Tag =");
+
+				if (end + 1)
+				{
+					return pretty_name.substr(0, end);
+				}
+
+				end = pretty_name.find(", Tag =");
+
+				if (end + 1)
+				{
+					return pretty_name.substr(0, end);
+				}
+
+				if (!pretty_name.empty() && pretty_name.back() == ']')
+				{
+					pretty_name.remove_suffix(1);
+				}
+
+				return pretty_name;
+			}
+
+			return {};
+#endif
+		}
+
+		// Save default constructor and destructor and optional joining operation
 		struct typeinfo
 		{
-			bool(*create)(uchar* ptr, manual_typemap&) noexcept;
-			void(*destroy)(void* ptr) noexcept;
+			bool(*create)(uchar* ptr, manual_typemap&) noexcept = nullptr;
+			void(*stop)(void* ptr, thread_state) noexcept = nullptr;
+			void(*destroy)(void* ptr) noexcept = nullptr;
+			std::string_view name{};
 
 			template <typename T>
 			static bool call_ctor(uchar* ptr, manual_typemap& _this) noexcept
@@ -47,6 +90,13 @@ namespace stx
 			}
 
 			template <typename T>
+			static void call_stop(void* ptr, thread_state state) noexcept
+			{
+				// Abort and/or join (expected thread_state::aborting or thread_state::finished)
+				*std::launder(static_cast<T*>(ptr)) = state;
+			}
+
+			template <typename T>
 			static typeinfo make_typeinfo()
 			{
 				static_assert(!std::is_copy_assignable_v<T> && !std::is_copy_constructible_v<T>, "Please make sure the object cannot be accidentally copied.");
@@ -54,6 +104,18 @@ namespace stx
 				typeinfo r;
 				r.create = &call_ctor<T>;
 				r.destroy = &call_dtor<T>;
+
+				if constexpr (std::is_assignable_v<T&, thread_state>)
+				{
+					r.stop = &call_stop<T>;
+				}
+
+#ifdef _MSC_VER
+				constexpr std::string_view name = parse_type(__FUNCSIG__);
+#else
+				constexpr std::string_view name = parse_type(__PRETTY_FUNCTION__);
+#endif
+				r.name = name;
 				return r;
 			}
 		};
@@ -93,8 +155,8 @@ namespace stx
 				clear();
 			}
 
-			m_order = new void*[stx::typelist<typeinfo>().count()];
-			m_info = new const typeinfo*[stx::typelist<typeinfo>().count()];
+			m_order = new void*[stx::typelist<typeinfo>().count() + 1];
+			m_info = new const typeinfo*[stx::typelist<typeinfo>().count() + 1];
 			m_init = new bool[stx::typelist<typeinfo>().count()]{};
 
 			if constexpr (Size == 0)
@@ -114,6 +176,9 @@ namespace stx
 				ensure(Align >= stx::typelist<typeinfo>().align());
 				m_data[0] = 0;
 			}
+
+			*m_order++ = nullptr;
+			*m_info++ = nullptr;
 		}
 
 		void init(bool reset = true)
@@ -169,6 +234,8 @@ namespace stx
 			}
 
 			// Pointers should be restored to their positions
+			m_info--;
+			m_order--;
 			delete[] m_init;
 			delete[] m_info;
 			delete[] m_order;
@@ -280,6 +347,53 @@ namespace stx
 			}
 
 			[[unlikely]] return nullptr;
+		}
+
+		class iterator
+		{
+			const typeinfo** m_info;
+			void** m_ptr;
+
+		public:
+			iterator(const typeinfo** _info, void** _ptr)
+				: m_info(_info)
+				, m_ptr(_ptr)
+			{
+			}
+
+			std::pair<const typeinfo&, void*> operator*() const
+			{
+				return {*m_info[-1], m_ptr[-1]};
+			}
+
+			iterator& operator++()
+			{
+				m_info--;
+				m_ptr--;
+
+				if (!m_info[-1])
+				{
+					m_info = nullptr;
+					m_ptr = nullptr;
+				}
+
+				return *this;
+			}
+
+			bool operator!=(const iterator& rhs) const
+			{
+				return m_info != rhs.m_info || m_ptr != rhs.m_ptr;
+			}
+		};
+
+		iterator begin() noexcept
+		{
+			return iterator{m_info, m_order};
+		}
+
+		iterator end() noexcept
+		{
+			return iterator{nullptr, nullptr};
 		}
 	};
 }

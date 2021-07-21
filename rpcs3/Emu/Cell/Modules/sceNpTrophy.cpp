@@ -18,7 +18,6 @@
 #include "Emu/Cell/lv2/sys_process.h"
 #include "Emu/Cell/lv2/sys_fs.h"
 
-#include <cmath>
 #include <shared_mutex>
 #include "util/asm.hpp"
 
@@ -161,21 +160,7 @@ void fmt_class_string<SceNpCommunicationSignature>::format(std::string& out, u64
 {
 	const auto& sign = get_object(arg);
 
-	// Format as a C byte array for ease of use
-	fmt::append(out, "{ ");
-
-	for (usz i = 0;; i++)
-	{
-		if (i == std::size(sign.data) - 1)
-		{
-			fmt::append(out, "0x%02X", sign.data[i]);
-			break;
-		}
-
-		fmt::append(out, "0x%02X, ", sign.data[i]);
-	}
-
-	fmt::append(out, " }");
+	fmt::append(out, "%s", sign.data);
 }
 
 // Helpers
@@ -579,11 +564,11 @@ error_code sceNpTrophyRegisterContext(ppu_thread& ppu, u32 context, u32 handle, 
 		return SCE_NP_TROPHY_ERROR_ILLEGAL_UPDATE;
 	}
 
-	TROPUSRLoader* tropusr = new TROPUSRLoader();
+	const auto& tropusr = ctxt->tropusr = std::make_unique<TROPUSRLoader>();
 	const std::string trophyUsrPath = trophyPath + "/TROPUSR.DAT";
 	const std::string trophyConfPath = trophyPath + "/TROPCONF.SFM";
-	tropusr->Load(trophyUsrPath, trophyConfPath);
-	ctxt->tropusr.reset(tropusr);
+
+	ensure(tropusr->Load(trophyUsrPath, trophyConfPath).success);
 
 	// This emulates vsh sending the events and ensures that not 2 events are processed at once
 	const std::pair<u32, s32> statuses[] =
@@ -827,6 +812,7 @@ error_code sceNpTrophyGetGameInfo(u32 context, u32 handle, vm::ptr<SceNpTrophyGa
 					case 'S': data->unlockedSilver++;   break;
 					case 'G': data->unlockedGold++;     break;
 					case 'P': data->unlockedPlatinum++; break;
+					default: break;
 					}
 				}
 			}
@@ -1038,6 +1024,7 @@ static error_code NpTrophyGetTrophyInfo(const trophy_context_t* ctxt, s32 trophy
 				case 'S': tmp_details.trophyGrade = SCE_NP_TROPHY_GRADE_SILVER;   break;
 				case 'G': tmp_details.trophyGrade = SCE_NP_TROPHY_GRADE_GOLD;     break;
 				case 'P': tmp_details.trophyGrade = SCE_NP_TROPHY_GRADE_PLATINUM; break;
+				default: break;
 				}
 
 				for (std::shared_ptr<rXmlNode> n2 = n->GetChildren(); n2; n2 = n2->GetNext())

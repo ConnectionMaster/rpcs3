@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include "Emu/System.h"
 #include "Emu/VFS.h"
+#include "Emu/IdManager.h"
 #include "Emu/localized_string.h"
 #include "Emu/Cell/lv2/sys_fs.h"
 #include "Emu/Cell/lv2/sys_sync.h"
@@ -14,11 +15,11 @@
 
 #include "Loader/PSF.h"
 #include "Utilities/StrUtil.h"
-#include "Utilities/span.h"
+#include "Utilities/date_time.h"
 
-#include <thread>
 #include <mutex>
 #include <algorithm>
+#include <span>
 
 #include "util/asm.hpp"
 
@@ -51,6 +52,23 @@ void fmt_class_string<CellSaveDataError>::format(std::string& out, u64 arg)
 
 SaveDialogBase::~SaveDialogBase()
 {
+}
+
+std::string SaveDataEntry::date() const
+{
+	return date_time::fmt_time("%c", mtime);
+}
+
+std::string SaveDataEntry::data_size() const
+{
+	std::string metric = "KB";
+	u64 sz = utils::aligned_div(size, 1000);
+	if (sz > 1000)
+	{
+		metric = "MB";
+		sz = utils::aligned_div(sz, 1000);
+	}
+	return fmt::format("%lu %s", sz, metric);
 }
 
 // cellSaveData aliases (only for cellSaveData.cpp)
@@ -98,7 +116,7 @@ vm::gvar<savedata_context> g_savedata_context;
 struct savedata_manager
 {
 	semaphore<> mutex;
-	atomic_t<bool> enable_overlay;
+	atomic_t<bool> enable_overlay{false};
 };
 
 static std::vector<SaveDataEntry> get_save_entries(const std::string& base_dir, const std::string& prefix)
@@ -315,7 +333,7 @@ static error_code display_callback_result_error_message(ppu_thread& ppu, const C
 
 static std::string get_confirmation_message(u32 operation, const SaveDataEntry& entry)
 {
-	const std::string info = entry.title + "\n" + entry.subtitle + "\n" + entry.details;
+	const std::string info = fmt::format("%s\n%s\n%s\n%s\n\n%s", entry.title, entry.subtitle, entry.date(), entry.data_size(), entry.details);
 
 	if (operation == SAVEDATA_OP_LIST_DELETE || operation == SAVEDATA_OP_FIXED_DELETE)
 	{
@@ -556,7 +574,7 @@ static NEVER_INLINE error_code savedata_op(ppu_thread& ppu, u32 operation, u32 v
 	if (const auto ecode = savedata_check_args(operation, version, dirName, errDialog, setList, setBuf, funcList, funcFixed, funcStat,
 		funcFile, container, unk_op_flags, userdata, userId, funcDone))
 	{
-		return {CELL_SAVEDATA_ERROR_PARAM, std::to_string(ecode)};
+		return {CELL_SAVEDATA_ERROR_PARAM, " (error %d)", ecode};
 	}
 
 	std::unique_lock lock(g_fxo->get<savedata_manager>().mutex, std::try_to_lock);
@@ -895,7 +913,7 @@ static NEVER_INLINE error_code savedata_op(ppu_thread& ppu, u32 operation, u32 v
 			}
 			case CELL_SAVEDATA_FOCUSPOS_LATEST:
 			{
-				s64 max = INT64_MIN;
+				s64 max = smin;
 
 				for (u32 i = 0; i < save_entries.size(); i++)
 				{
@@ -910,7 +928,7 @@ static NEVER_INLINE error_code savedata_op(ppu_thread& ppu, u32 operation, u32 v
 			}
 			case CELL_SAVEDATA_FOCUSPOS_OLDEST:
 			{
-				s64 min = INT64_MAX;
+				s64 min = smax;
 
 				for (u32 i = 0; i < save_entries.size(); i++)
 				{
@@ -932,7 +950,7 @@ static NEVER_INLINE error_code savedata_op(ppu_thread& ppu, u32 operation, u32 v
 					return {CELL_SAVEDATA_ERROR_PARAM, "34"};
 				}
 
-				//TODO: If adding the new data to the save_entries vector
+				// TODO: If adding the new data to the save_entries vector
 				// to be displayed in the save mangaer UI, it should be focused here
 				break;
 			}
@@ -1023,7 +1041,7 @@ static NEVER_INLINE error_code savedata_op(ppu_thread& ppu, u32 operation, u32 v
 			// UI returns -1 for new save games
 			if (selected == -1)
 			{
-				message = get_localized_string(localized_string_id::CELL_SAVEDATA_CREATE_CONFIRMATION);
+				message = get_localized_string(localized_string_id::CELL_SAVEDATA_SAVE_CONFIRMATION);
 				save_entry.dirName = listSet->newData->dirName.get_ptr();
 				save_entry.escaped = vfs::escape(save_entry.dirName);
 			}
@@ -1053,6 +1071,10 @@ static NEVER_INLINE error_code savedata_op(ppu_thread& ppu, u32 operation, u32 v
 
 			if (g_last_user_response != CELL_MSGDIALOG_BUTTON_YES)
 			{
+				if (selected >= 0)
+				{
+					focused = selected;
+				}
 				continue;
 			}
 
@@ -1151,7 +1173,7 @@ static NEVER_INLINE error_code savedata_op(ppu_thread& ppu, u32 operation, u32 v
 
 				if (selected == -1)
 				{
-					message = get_localized_string(localized_string_id::CELL_SAVEDATA_CREATE_CONFIRMATION);
+					message = get_localized_string(localized_string_id::CELL_SAVEDATA_SAVE_CONFIRMATION);
 				}
 				else
 				{
@@ -1206,6 +1228,11 @@ static NEVER_INLINE error_code savedata_op(ppu_thread& ppu, u32 operation, u32 v
 				if (const s32 res = result->result; res != CELL_SAVEDATA_CBRESULT_OK_NEXT)
 				{
 					cellSaveData.warning("savedata_op(): funcDone returned result=%d.", res);
+
+					if (res == CELL_SAVEDATA_CBRESULT_OK_LAST || res == CELL_SAVEDATA_CBRESULT_OK_LAST_NOCONFIRM)
+					{
+						return CELL_OK;
+					}
 
 					return display_callback_result_error_message(ppu, *result, errDialog);
 				}
@@ -1632,7 +1659,7 @@ static NEVER_INLINE error_code savedata_op(ppu_thread& ppu, u32 operation, u32 v
 			if (dotpos)
 			{
 				// Copy file name
-				gsl::span dst(name, dotpos + 1);
+				std::span dst(name, dotpos + 1);
 				strcpy_trunc(dst, file_path);
 
 				// Allow multiple '.' even though sysutil_check_name_string does not
@@ -1669,7 +1696,7 @@ static NEVER_INLINE error_code savedata_op(ppu_thread& ppu, u32 operation, u32 v
 			if (file_path.size() > dotpos + 1)
 			{
 				// Copy file extension
-				gsl::span dst(name, file_path.size() - dotpos);
+				std::span dst(name, file_path.size() - dotpos);
 				strcpy_trunc(dst, file_path.operator std::string_view().substr(dotpos + 1));
 
 				// Allow '_' at start even though sysutil_check_name_string does not
@@ -1924,7 +1951,13 @@ static NEVER_INLINE error_code savedata_op(ppu_thread& ppu, u32 operation, u32 v
 			if (auto file = pair.second.release())
 			{
 				auto&& fvec = static_cast<fs::container_stream<std::vector<uchar>>&>(*file);
-				ensure(fs::write_file<true>(new_path + vfs::escape(pair.first), fs::rewrite, fvec.obj));
+#ifdef _WIN32
+				fs::pending_file f(new_path + vfs::escape(pair.first));
+				f.file.write(fvec.obj);
+				ensure(f.commit());
+#else
+				ensure(fs::write_file(new_path + vfs::escape(pair.first), fs::rewrite, fvec.obj));
+#endif
 			}
 		}
 

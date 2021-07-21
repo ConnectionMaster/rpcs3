@@ -48,6 +48,8 @@
 #include "sys_uart.h"
 #include "sys_crypto_engine.h"
 
+#include <optional>
+
 extern std::string ppu_get_syscall_name(u64 code);
 
 template <>
@@ -525,7 +527,7 @@ const std::array<std::pair<ppu_function_t, std::string_view>, 1024> g_ppu_syscal
 	BIND_SYSC(sys_hid_manager_check_focus),                 //510 (0x1FE)
 	NULL_FUNC(sys_hid_manager_set_master_process),          //511 (0x1FF)  ROOT
 	BIND_SYSC(sys_hid_manager_is_process_permission_root),  //512 (0x200)  ROOT
-	null_func,//BIND_SYSC(sys_hid_manager_...),             //513 (0x201)
+	BIND_SYSC(sys_hid_manager_513),                         //513 (0x201)
 	BIND_SYSC(sys_hid_manager_514),                         //514 (0x202)
 	uns_func,                                               //515 (0x203)  UNS
 	BIND_SYSC(sys_config_open),                             //516 (0x204)
@@ -561,13 +563,13 @@ const std::array<std::pair<ppu_function_t, std::string_view>, 1024> g_ppu_syscal
 	BIND_SYSC(sys_usbd_event_port_send),                    //549 (0x225)
 	BIND_SYSC(sys_usbd_allocate_memory),                    //550 (0x226)
 	BIND_SYSC(sys_usbd_free_memory),                        //551 (0x227)
-	null_func,//BIND_SYSC(sys_ubsd_...),                    //552 (0x228)
-	null_func,//BIND_SYSC(sys_ubsd_...),                    //553 (0x229)
-	null_func,//BIND_SYSC(sys_ubsd_...),                    //554 (0x22A)
-	null_func,//BIND_SYSC(sys_ubsd_...),                    //555 (0x22B)
+	null_func,//BIND_SYSC(sys_usbd_...),                    //552 (0x228)
+	null_func,//BIND_SYSC(sys_usbd_...),                    //553 (0x229)
+	null_func,//BIND_SYSC(sys_usbd_...),                    //554 (0x22A)
+	null_func,//BIND_SYSC(sys_usbd_...),                    //555 (0x22B)
 	BIND_SYSC(sys_usbd_get_device_speed),                   //556 (0x22C)
-	null_func,//BIND_SYSC(sys_ubsd_...),                    //557 (0x22D)
-	null_func,//BIND_SYSC(sys_ubsd_...),                    //558 (0x22E)
+	null_func,//BIND_SYSC(sys_usbd_...),                    //557 (0x22D)
+	null_func,//BIND_SYSC(sys_usbd_...),                    //558 (0x22E)
 	BIND_SYSC(sys_usbd_register_extra_ldd),                 //559 (0x22F)
 	null_func,//BIND_SYSC(sys_...),                         //560 (0x230)  ROOT
 	null_func,//BIND_SYSC(sys_...),                         //561 (0x231)  ROOT
@@ -1075,7 +1077,7 @@ extern void ppu_execute_syscall(ppu_thread& ppu, u64 code)
 	{
 		g_fxo->get<named_thread<ppu_syscall_usage>>().stat[code]++;
 
-		if (auto func = g_ppu_syscall_table[code].first)
+		if (const auto func = g_ppu_syscall_table[code].first)
 		{
 			func(ppu);
 			ppu_log.trace("Syscall '%s' (%llu) finished, r3=0x%llx", ppu_syscall_code(code), code, ppu.gpr[3]);
@@ -1143,7 +1145,7 @@ void lv2_obj::sleep_unlocked(cpu_thread& thread, u64 timeout)
 {
 	const u64 start_time = get_guest_system_time();
 
-	if (auto ppu = static_cast<ppu_thread*>(thread.id_type() == 1 ? &thread : nullptr))
+	if (auto ppu = thread.try_get<ppu_thread>())
 	{
 		ppu_log.trace("sleep() - waiting (%zu)", g_pending.size());
 
@@ -1263,6 +1265,7 @@ bool lv2_obj::awake_unlocked(cpu_thread* cpu, s32 prio)
 				break;
 			}
 		}
+		break;
 	}
 	case enqueue_cmd:
 	{
@@ -1385,4 +1388,45 @@ void lv2_obj::schedule_all()
 			break;
 		}
 	}
+}
+
+ppu_thread_status lv2_obj::ppu_state(ppu_thread* ppu, bool lock_idm, bool lock_lv2)
+{
+	std::optional<reader_lock> opt_lock[2];
+
+	if (lock_idm)
+	{
+		opt_lock[0].emplace(id_manager::g_mutex);
+	}
+
+	if (ppu->state & cpu_flag::stop)
+	{
+		return PPU_THREAD_STATUS_IDLE;
+	}
+
+	switch (ppu->joiner)
+	{
+	case ppu_join_status::zombie: return PPU_THREAD_STATUS_ZOMBIE;
+	case ppu_join_status::exited: return PPU_THREAD_STATUS_DELETED;
+	default: break;
+	}
+
+	if (lock_lv2)
+	{
+		opt_lock[1].emplace(lv2_obj::g_mutex);
+	}
+
+	const auto it = std::find(g_ppu.begin(), g_ppu.end(), ppu);
+
+	if (it == g_ppu.end())
+	{
+		return PPU_THREAD_STATUS_SLEEP;
+	}
+
+	if (it - g_ppu.begin() >= g_cfg.core.ppu_threads)
+	{
+		return PPU_THREAD_STATUS_RUNNABLE;
+	}
+
+	return PPU_THREAD_STATUS_ONPROC;
 }

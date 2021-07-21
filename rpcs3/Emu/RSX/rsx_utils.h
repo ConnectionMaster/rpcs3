@@ -51,16 +51,16 @@ namespace rsx
 	public:
 		void add_ref()
 		{
-			ref_count++;
+			++ref_count;
 			idle_time = 0;
 		}
 
 		void release()
 		{
-			ref_count--;
+			--ref_count;
 		}
 
-		bool has_refs()
+		bool has_refs() const
 		{
 			return (ref_count > 0);
 		}
@@ -161,7 +161,7 @@ namespace rsx
 		u32 resolution_y = 720;    // Y RES
 		atomic_t<u32> state = 0;   // 1 after cellVideoOutConfigure was called
 
-		u32 get_compatible_gcm_format()
+		u32 get_compatible_gcm_format() const
 		{
 			switch (format)
 			{
@@ -176,7 +176,7 @@ namespace rsx
 			}
 		}
 
-		u8 get_bpp()
+		u8 get_bpp() const
 		{
 			switch (format)
 			{
@@ -855,18 +855,17 @@ namespace rsx
 	template <int N>
 	void unpack_bitset(const std::bitset<N>& block, u64* values)
 	{
-		constexpr int count = N / 64;
-		for (int n = 0; n < count; ++n)
+		for (int bit = 0, n = -1, shift = 0; bit < N; ++bit, ++shift)
 		{
-			int i = (n << 6);
-			values[n] = 0;
-
-			for (int bit = 0; bit < 64; ++bit, ++i)
+			if ((bit % 64) == 0)
 			{
-				if (block[i])
-				{
-					values[n] |= (1ull << bit);
-				}
+				values[++n] = 0;
+				shift = 0;
+			}
+
+			if (block[bit])
+			{
+				values[n] |= (1ull << shift);
 			}
 		}
 	}
@@ -874,18 +873,11 @@ namespace rsx
 	template <int N>
 	void pack_bitset(std::bitset<N>& block, u64* values)
 	{
-		constexpr int count = N / 64;
-		for (int n = (count - 1); n >= 0; --n)
+		for (int n = 0, shift = 0; shift < N; ++n, shift += 64)
 		{
-			if ((n + 1) < count)
-			{
-				block <<= 64;
-			}
-
-			if (values[n])
-			{
-				block |= values[n];
-			}
+			std::bitset<N> tmp = values[n];
+			tmp <<= shift;
+			block |= tmp;
 		}
 	}
 
@@ -893,11 +885,10 @@ namespace rsx
 	class atomic_bitmask_t
 	{
 	private:
-		atomic_t<bitmask_type> m_data;
+		atomic_t<bitmask_type> m_data{0};
 
 	public:
-		atomic_bitmask_t() { m_data.store(0); }
-		~atomic_bitmask_t() = default;
+		atomic_bitmask_t() = default;
 
 		T load() const
 		{
@@ -953,6 +944,7 @@ namespace rsx
 	public:
 		using iterator = Ty*;
 		using const_iterator = const Ty*;
+		using value_type = Ty;
 
 	private:
 		u32 _capacity = 0;
@@ -988,7 +980,7 @@ namespace rsx
 			}
 		}
 
-		simple_array(const simple_array<Ty>& other)
+		simple_array(const simple_array& other)
 		{
 			_capacity = other._capacity;
 			_size = other._size;
@@ -998,9 +990,25 @@ namespace rsx
 			std::memcpy(_data, other._data, size_bytes);
 		}
 
-		simple_array(simple_array<Ty>&& other) noexcept
+		simple_array(simple_array&& other) noexcept
 		{
 			swap(other);
+		}
+
+		simple_array& operator=(const simple_array& other)
+		{
+			if (&other != this)
+			{
+				simple_array{other}.swap(*this);
+			}
+
+			return *this;
+		}
+
+		simple_array& operator=(simple_array&& other) noexcept
+		{
+			swap(other);
+			return *this;
 		}
 
 		~simple_array()

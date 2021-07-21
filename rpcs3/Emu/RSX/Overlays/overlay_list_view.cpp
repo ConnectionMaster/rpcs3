@@ -1,5 +1,5 @@
 #include "stdafx.h"
-#include "overlay_controls.h"
+#include "overlay_list_view.hpp"
 #include "Emu/system_config.h"
 
 namespace rsx
@@ -152,7 +152,7 @@ namespace rsx
 			update_selection();
 		}
 
-		int list_view::get_selected_index()
+		int list_view::get_selected_index() const
 		{
 			return m_selected_entry;
 		}

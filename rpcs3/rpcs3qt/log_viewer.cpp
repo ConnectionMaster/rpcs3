@@ -5,6 +5,7 @@
 #include "syntax_highlighter.h"
 #include "find_dialog.h"
 
+#include <QApplication>
 #include <QMenu>
 #include <QFile>
 #include <QFileDialog>
@@ -22,8 +23,8 @@ inline std::string sstr(const QString& _in)
 	return _in.toStdString();
 }
 
-log_viewer::log_viewer(std::shared_ptr<gui_settings> settings)
-    : m_gui_settings(settings)
+log_viewer::log_viewer(std::shared_ptr<gui_settings> gui_settings)
+    : m_gui_settings(std::move(gui_settings))
 {
 	setWindowTitle(tr("Log Viewer"));
 	setObjectName("log_viewer");
@@ -35,7 +36,7 @@ log_viewer::log_viewer(std::shared_ptr<gui_settings> settings)
 
 	m_path_last = m_gui_settings->GetValue(gui::fd_log_viewer).toString();
 
-	m_log_text = new QTextEdit(this);
+	m_log_text = new QPlainTextEdit(this);
 	m_log_text->setReadOnly(true);
 	m_log_text->setContextMenuPolicy(Qt::CustomContextMenu);
 	m_log_text->setWordWrapMode(QTextOption::NoWrap);
@@ -51,8 +52,6 @@ log_viewer::log_viewer(std::shared_ptr<gui_settings> settings)
 	setLayout(layout);
 
 	connect(m_log_text, &QWidget::customContextMenuRequested, this, &log_viewer::show_context_menu);
-
-	show_log();
 }
 
 void log_viewer::show_context_menu(const QPoint& pos)
@@ -79,7 +78,7 @@ void log_viewer::show_context_menu(const QPoint& pos)
 		show_log();
 	});
 
-	const auto obj = qobject_cast<QTextEdit*>(sender());
+	const auto obj = qobject_cast<QPlainTextEdit*>(sender());
 
 	QPoint origin;
 
@@ -95,7 +94,7 @@ void log_viewer::show_context_menu(const QPoint& pos)
 	menu.exec(origin);
 }
 
-void log_viewer::show_log()
+void log_viewer::show_log() const
 {
 	if (m_path_last.isEmpty())
 	{
@@ -103,6 +102,8 @@ void log_viewer::show_log()
 	}
 
 	m_log_text->clear();
+	m_log_text->setPlainText(tr("Loading file..."));
+	QApplication::processEvents();
 
 	if (QFile file(m_path_last);
 		file.exists() && file.open(QIODevice::ReadOnly | QIODevice::Text))
@@ -110,17 +111,13 @@ void log_viewer::show_log()
 		m_gui_settings->SetValue(gui::fd_log_viewer, m_path_last);
 
 		QTextStream stream(&file);
-
-		while (!stream.atEnd())
-		{
-			m_log_text->append(stream.readLine());
-		}
-
+		m_log_text->setPlainText(stream.readAll());
 		file.close();
 	}
 	else
 	{
 		gui_log.error("log_viewer: Failed to open %s", sstr(m_path_last));
+		m_log_text->setPlainText(tr("Failed to open '%0'").arg(m_path_last));
 	}
 }
 

@@ -180,7 +180,7 @@ namespace atomic_wait
 	} any_value;
 
 	template <typename X, typename T = decltype(std::declval<X>().observe())>
-	constexpr u128 default_mask = sizeof(T) <= 8 ? u128{UINT64_MAX >> ((64 - sizeof(T) * 8) & 63)} : u128(-1);
+	constexpr u128 default_mask = sizeof(T) <= 8 ? u128{u64{umax} >> ((64 - sizeof(T) * 8) & 63)} : u128(-1);
 
 	template <typename X, typename T = decltype(std::declval<X>().observe())>
 	constexpr u128 get_value(X&, T value = T{}, ...)
@@ -312,7 +312,7 @@ private:
 	template <uint Max, typename... T>
 	friend class atomic_wait::list;
 
-	static void	wait(const void* data, u32 size, u128 old128, u64 timeout, u128 mask128, atomic_wait::info* extension = nullptr);
+	static void wait(const void* data, u32 size, u128 old_value, u64 timeout, u128 mask, atomic_wait::info* ext = nullptr);
 	static void notify_one(const void* data, u32 size, u128 mask128);
 	static void notify_all(const void* data, u32 size, u128 mask128);
 
@@ -1083,6 +1083,11 @@ struct atomic_storage<T, 16> : atomic_storage<T, 0>
 	// TODO
 };
 
+#ifndef _MSC_VER
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Weffc++"
+#endif
+
 // Atomic type with lock-free and standard layout guarantees (and appropriate limitations)
 template <typename T, usz Align = sizeof(T)>
 class atomic_t
@@ -1107,15 +1112,13 @@ protected:
 
 public:
 	static constexpr usz align = Align;
+	using enable_bitcopy = std::true_type;
 
 	atomic_t() noexcept = default;
 
 	atomic_t(const atomic_t&) = delete;
 
 	atomic_t& operator =(const atomic_t&) = delete;
-
-	// Define simple type
-	using simple_type = simple_t<T>;
 
 	constexpr atomic_t(const type& value) noexcept
 		: m_data(value)
@@ -1224,7 +1227,7 @@ public:
 	}
 
 	// Atomically read data
-	operator simple_type() const
+	operator std::common_type_t<T>() const
 	{
 		return atomic_storage<type>::load(m_data);
 	}
@@ -1512,7 +1515,7 @@ public:
 	}
 
 	// Conditionally decrement
-	bool try_dec(simple_type greater_than)
+	bool try_dec(std::common_type_t<T> greater_than)
 	{
 		type _new, old = atomic_storage<type>::load(m_data);
 
@@ -1535,7 +1538,7 @@ public:
 	}
 
 	// Conditionally increment
-	bool try_inc(simple_type less_than)
+	bool try_inc(std::common_type_t<T> less_than)
 	{
 		type _new, old = atomic_storage<type>::load(m_data);
 
@@ -1623,8 +1626,6 @@ class atomic_t<bool, Align> : private atomic_t<uchar, Align>
 public:
 	static constexpr usz align = Align;
 
-	using simple_type = bool;
-
 	atomic_t() noexcept = default;
 
 	atomic_t(const atomic_t&) = delete;
@@ -1640,6 +1641,9 @@ public:
 	{
 		return base::load() != 0;
 	}
+
+	// Override implicit conversion from the parent type
+	explicit operator uchar() const = delete;
 
 	operator bool() const noexcept
 	{
@@ -1705,8 +1709,23 @@ public:
 	}
 };
 
+// Specializations
+
+template <typename T, usz Align, typename T2, usz Align2>
+struct std::common_type<atomic_t<T, Align>, atomic_t<T2, Align2>> : std::common_type<T, T2> {};
+
+template <typename T, usz Align, typename T2>
+struct std::common_type<atomic_t<T, Align>, T2> : std::common_type<T, std::common_type_t<T2>> {};
+
+template <typename T, typename T2, usz Align2>
+struct std::common_type<T, atomic_t<T2, Align2>> : std::common_type<std::common_type_t<T>, T2> {};
+
 namespace atomic_wait
 {
 	template <usz Align>
 	constexpr u128 default_mask<atomic_t<bool, Align>> = 1;
 }
+
+#ifndef _MSC_VER
+#pragma GCC diagnostic pop
+#endif

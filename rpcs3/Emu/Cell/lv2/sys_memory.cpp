@@ -12,6 +12,12 @@
 
 LOG_CHANNEL(sys_memory);
 
+lv2_memory_container::lv2_memory_container(u32 size, bool from_idm) noexcept
+	: size(size)
+	, id{from_idm ? idm::last_id() : SYS_MEMORY_CONTAINER_ID_INVALID}
+{
+}
+
 //
 static shared_mutex s_memstats_mtx;
 
@@ -60,7 +66,7 @@ error_code sys_memory_allocate(cpu_thread& cpu, u32 size, u64 flags, vm::ptr<u32
 
 	if (const auto area = vm::reserve_map(align == 0x10000 ? vm::user64k : vm::user1m, 0, utils::align(size, 0x10000000), 0x401))
 	{
-		if (u32 addr = area->alloc(size, nullptr, align))
+		if (const u32 addr = area->alloc(size, nullptr, align))
 		{
 			ensure(!g_fxo->get<sys_memory_address_table>().addrs[addr >> 16].exchange(&dct));
 
@@ -131,7 +137,7 @@ error_code sys_memory_allocate_from_container(cpu_thread& cpu, u32 size, u32 cid
 
 	if (const auto area = vm::reserve_map(align == 0x10000 ? vm::user64k : vm::user1m, 0, utils::align(size, 0x10000000), 0x401))
 	{
-		if (u32 addr = area->alloc(size))
+		if (const u32 addr = area->alloc(size))
 		{
 			ensure(!g_fxo->get<sys_memory_address_table>().addrs[addr >> 16].exchange(ct.ptr.get()));
 
@@ -265,7 +271,7 @@ error_code sys_memory_container_create(cpu_thread& cpu, vm::ptr<u32> cid, u32 si
 	}
 
 	// Create the memory container
-	if (const u32 id = idm::make<lv2_memory_container>(size))
+	if (const u32 id = idm::make<lv2_memory_container>(size, true))
 	{
 		*cid = id;
 		return CELL_OK;

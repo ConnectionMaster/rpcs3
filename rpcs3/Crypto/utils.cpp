@@ -1,6 +1,6 @@
 // Copyright (C) 2014       Hykem <hykem@hotmail.com>
-// Licensed under the terms of the GNU GPL, version 3
-// http://www.gnu.org/licenses/gpl-3.0.txt
+// Licensed under the terms of the GNU GPL, version 2.0 or later versions.
+// http://www.gnu.org/licenses/gpl-2.0.txt
 
 #include "utils.h"
 #include "aes.h"
@@ -9,12 +9,12 @@
 #include <stdio.h>
 #include <time.h>
 #include "Utilities/StrUtil.h"
-#include "Utilities/span.h"
 #include "Utilities/File.h"
 
 #include <memory>
 #include <string>
 #include <string_view>
+#include <span>
 
 // Auxiliary functions (endian swap, xor).
 
@@ -45,7 +45,7 @@ u64 hex_to_u64(const char* hex_str)
 
 void hex_to_bytes(unsigned char* data, const char* hex_str, unsigned int str_length)
 {
-	auto strn_length = (str_length > 0) ? str_length : std::strlen(hex_str);
+	const auto strn_length = (str_length > 0) ? str_length : std::strlen(hex_str);
 	auto data_length = strn_length / 2;
 	char tmp_buf[3] = {0, 0, 0};
 
@@ -93,7 +93,7 @@ void aesecb128_encrypt(unsigned char *key, unsigned char *in, unsigned char *out
 
 bool hmac_hash_compare(unsigned char *key, int key_len, unsigned char *in, int in_len, unsigned char *hash, int hash_len)
 {
-	std::unique_ptr<u8[]> out(new u8[key_len]);
+	const std::unique_ptr<u8[]> out(new u8[key_len]);
 
 	sha1_hmac(key, key_len, in, in_len, out.get());
 
@@ -107,7 +107,7 @@ void hmac_hash_forge(unsigned char *key, int key_len, unsigned char *in, int in_
 
 bool cmac_hash_compare(unsigned char *key, int key_len, unsigned char *in, int in_len, unsigned char *hash, int hash_len)
 {
-	std::unique_ptr<u8[]> out(new u8[key_len]);
+	const std::unique_ptr<u8[]> out(new u8[key_len]);
 
 	aes_context ctx;
 	aes_setkey_enc(&ctx, key, 128);
@@ -127,12 +127,18 @@ char* extract_file_name(const char* file_path, char real_file_name[CRYPTO_MAX_PA
 {
 	std::string_view v(file_path);
 
-	if (auto pos = v.find_last_of(fs::delim); pos != umax)
+	if (const auto pos = v.find_last_of(fs::delim); pos != umax)
 	{
 		v.remove_prefix(pos + 1);
 	}
 
-	gsl::span r(real_file_name, CRYPTO_MAX_PATH);
+	std::span r(real_file_name, CRYPTO_MAX_PATH);
 	strcpy_trunc(r, v);
 	return real_file_name;
+}
+
+void mbedtls_zeroize(void *v, size_t n)
+{
+	static void *(*const volatile unop_memset)(void *, int, size_t) = &memset;
+	(void)unop_memset(v, 0, n);
 }

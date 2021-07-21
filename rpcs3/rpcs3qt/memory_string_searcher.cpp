@@ -132,10 +132,10 @@ void memory_string_searcher::OnSearch()
 			wstr += part;
 		}
 
-		if (usz pos = wstr.find_first_not_of(hex_chars); pos != umax)
+		if (const usz pos = wstr.find_first_not_of(hex_chars); pos != umax)
 		{
-			gui_log.error("String '%s' cannot be interpreted as hexadecimal byte string due to unknown character '%s'."
-				, m_addr_line->text().toStdString(), std::string_view{&wstr[pos], 1});
+			gui_log.error("String '%s' cannot be interpreted as hexadecimal byte string due to unknown character '%s'.",
+				m_addr_line->text().toStdString(), std::string_view{&wstr[pos], 1});
 			return;
 		}
 
@@ -196,7 +196,7 @@ void memory_string_searcher::OnSearch()
 
 	vm::reader_lock rlock;
 
-	named_thread_group workers("String Searcher "sv, max_threads, [&]()
+	const named_thread_group workers("String Searcher "sv, max_threads, [&]()
 	{
 		u32 local_found = 0;
 
@@ -254,7 +254,7 @@ void memory_string_searcher::OnSearch()
 
 			u64 addr_max = addr;
 
-			const u64 end_mem = std::min<u64>(utils::align<u64>(addr + 1, block_size) + 0x1000, UINT32_MAX);
+			const u64 end_mem = std::min<u64>(utils::align<u64>(addr + 1, block_size) + 0x1000, u32{umax});
 
 			// Determine allocation size quickly
 			while (addr_max < end_mem && vm::check_addr(static_cast<u32>(addr_max), vm::page_1m_size))
@@ -294,7 +294,7 @@ void memory_string_searcher::OnSearch()
 					// Allow overlapping strings
 					first_char++;
 				}
-			} 
+			}
 			else
 			{
 				while (first_char = section.find_first_of(wstr[0], first_char), first_char != umax)

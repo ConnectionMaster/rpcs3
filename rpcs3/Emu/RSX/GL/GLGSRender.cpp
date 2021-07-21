@@ -3,13 +3,10 @@
 #include "../Overlays/Shaders/shader_loading_dialog_native.h"
 #include "GLGSRender.h"
 #include "GLCompute.h"
-#include "GLVertexProgram.h"
 #include "Emu/Memory/vm_locking.h"
 #include "Emu/RSX/rsx_methods.h"
 
-#include "../Common/program_state_cache2.hpp"
-
-#define DUMP_VERTEX_DATA 0
+#include "../Program/program_state_cache2.hpp"
 
 u64 GLGSRender::get_cycles()
 {
@@ -18,7 +15,7 @@ u64 GLGSRender::get_cycles()
 
 GLGSRender::GLGSRender() : GSRender()
 {
-	m_shaders_cache = std::make_unique<gl::shader_cache>(m_prog_buffer, "opengl", "v1.91");
+	m_shaders_cache = std::make_unique<gl::shader_cache>(m_prog_buffer, "opengl", "v1.92");
 
 	if (g_cfg.video.disable_vertex_cache || g_cfg.video.multithreaded_rsx)
 		m_vertex_cache = std::make_unique<gl::null_vertex_cache>();
@@ -197,10 +194,10 @@ void GLGSRender::on_init_thread()
 	{
 		rsx_log.warning("Forcing use of legacy OpenGL buffers because ARB_buffer_storage is not supported");
 		// TODO: do not modify config options
-		g_cfg.video.gl_legacy_buffers.from_string("true");
+		g_cfg.video.renderdoc_compatiblity.from_string("true");
 	}
 
-	if (g_cfg.video.gl_legacy_buffers)
+	if (g_cfg.video.renderdoc_compatiblity)
 	{
 		rsx_log.warning("Using legacy openGL buffers.");
 		manually_flush_ring_buffers = true;
@@ -362,6 +359,8 @@ void GLGSRender::on_exit()
 		gl::g_typeless_transfer_buffer.remove();
 	}
 
+	gl::debug::g_vis_texture.reset(); // TODO
+
 	gl::destroy_pipe_compiler();
 
 	m_prog_buffer.clear();
@@ -512,11 +511,11 @@ void GLGSRender::clear_surface(u32 arg)
 	GLbitfield mask = 0;
 
 	gl::command_context cmd{ gl_state };
-	const bool require_mem_load =
-		rsx::method_registers.scissor_origin_x() > 0 ||
-		rsx::method_registers.scissor_origin_y() > 0 ||
-		rsx::method_registers.scissor_width() < rsx::method_registers.surface_clip_width() ||
-		rsx::method_registers.scissor_height() < rsx::method_registers.surface_clip_height();
+	const bool full_frame =
+		rsx::method_registers.scissor_origin_x() == 0 &&
+		rsx::method_registers.scissor_origin_y() == 0 &&
+		rsx::method_registers.scissor_width() >= rsx::method_registers.surface_clip_width() &&
+		rsx::method_registers.scissor_height() >= rsx::method_registers.surface_clip_height();
 
 	bool update_color = false, update_z = false;
 	rsx::surface_depth_format2 surface_depth_format = rsx::method_registers.surface_depth_fmt();
@@ -544,32 +543,38 @@ void GLGSRender::clear_surface(u32 arg)
 				mask |= GLenum(gl::buffers::stencil);
 			}
 
-			if ((arg & 0x3) != 0x3 && !require_mem_load && ds->dirty())
+			if ((arg & 0x3) != 0x3 || !full_frame)
 			{
 				ensure(mask);
 
-				// Only one aspect was cleared. Make sure to memory initialize the other before removing dirty flag
-				if (arg == 1)
+				if (ds->state_flags & rsx::surface_state_flags::erase_bkgnd &&  // Needs initialization
+					ds->old_contents.empty() && !g_cfg.video.read_depth_buffer) // No way to load data from memory, so no initialization given
 				{
-					// Depth was cleared, initialize stencil
-					gl_state.stencil_mask(0xFF);
-					gl_state.clear_stencil(0xFF);
-					mask |= GLenum(gl::buffers::stencil);
+					// Only one aspect was cleared. Make sure to memory initialize the other before removing dirty flag
+					if (arg == 1)
+					{
+						// Depth was cleared, initialize stencil
+						gl_state.stencil_mask(0xFF);
+						gl_state.clear_stencil(0xFF);
+						mask |= GLenum(gl::buffers::stencil);
+					}
+					else
+					{
+						// Stencil was cleared, initialize depth
+						gl_state.depth_mask(GL_TRUE);
+						gl_state.clear_depth(1.f);
+						mask |= GLenum(gl::buffers::depth);
+					}
 				}
 				else
 				{
-					// Stencil was cleared, initialize depth
-					gl_state.depth_mask(GL_TRUE);
-					gl_state.clear_depth(1.f);
-					mask |= GLenum(gl::buffers::depth);
+					ds->write_barrier(cmd);
 				}
 			}
 		}
 
 		if (mask)
 		{
-			if (require_mem_load) ds->write_barrier(cmd);
-
 			// Memory has been initialized
 			update_z = true;
 		}
@@ -588,7 +593,7 @@ void GLGSRender::clear_surface(u32 arg)
 		case rsx::surface_color_format::w16z16y16x16:
 		case rsx::surface_color_format::w32z32y32x32:
 		{
-			//Nop
+			// Nop
 			colormask = 0;
 			break;
 		}
@@ -621,7 +626,11 @@ void GLGSRender::clear_surface(u32 arg)
 				 count < m_rtts.m_bound_render_targets_config.second;
 				 ++count, ++index)
 			{
-				if (require_mem_load) m_rtts.m_bound_render_targets[index].second->write_barrier(cmd);
+				if (!full_frame)
+				{
+					m_rtts.m_bound_render_targets[index].second->write_barrier(cmd);
+				}
+
 				gl_state.color_maski(count, colormask);
 			}
 
@@ -650,7 +659,7 @@ bool GLGSRender::load_program()
 		get_current_vertex_program(vs_sampler_state);
 
 		current_vertex_program.skip_vertex_input_check = true;	//not needed for us since decoding is done server side
-		current_fragment_program.unnormalized_coords = 0; //unused
+		current_fragment_program.texture_state.unnormalized_coords = 0; //unused
 	}
 	else if (m_program)
 	{
@@ -804,8 +813,7 @@ void GLGSRender::load_program_env()
 	{
 		// Fragment texture parameters
 		auto mapping = m_texture_parameters_buffer->alloc_from_heap(256, m_uniform_buffer_offset_align);
-		auto buf = static_cast<u8*>(mapping.first);
-		fill_fragment_texture_parameters(buf, current_fragment_program);
+		current_fragment_program.texture_params.write_to(mapping.first, current_fp_metadata.referenced_textures_mask);
 
 		m_texture_parameters_buffer->bind_range(GL_FRAGMENT_TEXTURE_PARAMS_BIND_SLOT, mapping.second, 256);
 	}
@@ -851,7 +859,7 @@ void GLGSRender::load_program_env()
 			// Control mask
 			const auto control_masks = reinterpret_cast<u32*>(fp_buf);
 			control_masks[0] = rsx::method_registers.shader_control();
-			control_masks[1] = current_fragment_program.texture_dimensions;
+			control_masks[1] = current_fragment_program.texture_state.texture_dimensions;
 
 			// Bind textures
 			m_shader_interpreter.update_fragment_textures(fs_sampler_state, current_fp_metadata.referenced_textures_mask, reinterpret_cast<u32*>(fp_buf + 16));

@@ -73,7 +73,7 @@ error_code sys_get_random_number(vm::ptr<void> addr, u64 size)
 {
 	sysPrxForUser.warning("sys_get_random_number(addr=*0x%x, size=%d)", addr, size);
 
-	if (size > 0x1000)
+	if (size > RANDOM_NUMBER_MAX_SIZE)
 	{
 		return CELL_EINVAL;
 	}
@@ -140,7 +140,8 @@ error_code cellSysconfPs1emu_EFDDAF6C()
 
 error_code sys_lv2coredump_D725F320()
 {
-	fmt::throw_exception("Unknown, unimplemented.");
+	sysPrxForUser.fatal("sys_lv2coredump_D725F320");
+	return CELL_OK;
 }
 
 error_code sys_get_bd_media_id()

@@ -27,7 +27,7 @@ void VKGSRender::reinitialize_swapchain()
 
 	for (auto &ctx : frame_context_storage)
 	{
-		if (ctx.present_image == UINT32_MAX)
+		if (ctx.present_image == umax)
 			continue;
 
 		// Release present image by presenting it
@@ -77,7 +77,7 @@ void VKGSRender::reinitialize_swapchain()
 
 void VKGSRender::present(vk::frame_context_t *ctx)
 {
-	ensure(ctx->present_image != UINT32_MAX);
+	ensure(ctx->present_image != umax);
 
 	// Partial CS flush
 	ctx->swap_command_buffer->flush();
@@ -100,7 +100,7 @@ void VKGSRender::present(vk::frame_context_t *ctx)
 	}
 
 	// Presentation image released; reset value
-	ctx->present_image = UINT32_MAX;
+	ctx->present_image = -1;
 }
 
 void VKGSRender::advance_queued_frames()
@@ -112,7 +112,7 @@ void VKGSRender::advance_queued_frames()
 	vk::vmm_check_memory_usage();
 
 	// m_rtts storage is double buffered and should be safe to tag on frame boundary
-	m_rtts.free_invalidated(*m_current_command_buffer);
+	m_rtts.free_invalidated(*m_current_command_buffer, vk::vmm_determine_memory_load_severity());
 
 	// Texture cache is also double buffered to prevent use-after-free
 	m_texture_cache.on_frame_end();
@@ -281,7 +281,7 @@ vk::image* VKGSRender::get_present_source(vk::present_surface_info* info, const 
 	// Check the surface store first
 	const auto format_bpp = rsx::get_format_block_size_in_bytes(info->format);
 	const auto overlap_info = m_rtts.get_merged_texture_memory_region(*m_current_command_buffer,
-		info->address, info->width, info->height, info->pitch, format_bpp, rsx::surface_access::read);
+		info->address, info->width, info->height, info->pitch, format_bpp, rsx::surface_access::shader_read);
 
 	if (!overlap_info.empty())
 	{
@@ -315,7 +315,7 @@ vk::image* VKGSRender::get_present_source(vk::present_surface_info* info, const 
 			if (viable)
 			{
 				surface->read_barrier(*m_current_command_buffer);
-				image_to_flip = section.surface->get_surface(rsx::surface_access::read);
+				image_to_flip = section.surface->get_surface(rsx::surface_access::shader_read);
 
 				std::tie(info->width, info->height) = rsx::apply_resolution_scale<true>(
 					std::min(surface_width, static_cast<u16>(info->width)),
@@ -498,7 +498,7 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 	}
 
 	// Prepare surface for new frame. Set no timeout here so that we wait for the next image if need be
-	ensure(m_current_frame->present_image == UINT32_MAX);
+	ensure(m_current_frame->present_image == umax);
 	ensure(m_current_frame->swap_command_buffer == nullptr);
 
 	u64 timeout = m_swapchain->get_swap_image_count() <= VK_MAX_ASYNC_FRAMES? 0ull: 100000000ull;
@@ -541,7 +541,7 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 	}
 
 	// Confirm that the driver did not silently fail
-	ensure(m_current_frame->present_image != UINT32_MAX);
+	ensure(m_current_frame->present_image != umax);
 
 	// Calculate output dimensions. Done after swapchain acquisition in case it was recreated.
 	coordi aspect_ratio;
@@ -637,7 +637,7 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 			single_target_pass = vk::get_renderpass(*m_device, key);
 			ensure(single_target_pass != VK_NULL_HANDLE);
 
-			direct_fbo = vk::get_framebuffer(*m_device, m_swapchain_dims.width, m_swapchain_dims.height, single_target_pass, m_swapchain->get_surface_format(), target_image);
+			direct_fbo = vk::get_framebuffer(*m_device, m_swapchain_dims.width, m_swapchain_dims.height, VK_FALSE, single_target_pass, m_swapchain->get_surface_format(), target_image);
 			direct_fbo->add_ref();
 			image_to_flip->push_layout(*m_current_command_buffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
@@ -655,8 +655,8 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 
 			const usz sshot_size = buffer_height * buffer_width * 4;
 
-			vk::buffer sshot_vkbuf(*m_device, utils::align(sshot_size, 0x100000), m_device->get_memory_mapping().host_visible_coherent, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-				VK_BUFFER_USAGE_TRANSFER_DST_BIT, 0);
+			vk::buffer sshot_vkbuf(*m_device, utils::align(sshot_size, 0x100000), m_device->get_memory_mapping().host_visible_coherent,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, VK_BUFFER_USAGE_TRANSFER_DST_BIT, 0, VMM_ALLOCATION_POOL_UNDEFINED);
 
 			VkBufferImageCopy copy_info;
 			copy_info.bufferOffset                    = 0;
@@ -715,7 +715,7 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 			single_target_pass = vk::get_renderpass(*m_device, key);
 			ensure(single_target_pass != VK_NULL_HANDLE);
 
-			direct_fbo = vk::get_framebuffer(*m_device, m_swapchain_dims.width, m_swapchain_dims.height, single_target_pass, m_swapchain->get_surface_format(), target_image);
+			direct_fbo = vk::get_framebuffer(*m_device, m_swapchain_dims.width, m_swapchain_dims.height, VK_FALSE, single_target_pass, m_swapchain->get_surface_format(), target_image);
 		}
 
 		direct_fbo->add_ref();
@@ -741,13 +741,15 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 				m_text_writer->init(*m_device, vk::get_renderpass(*m_device, key));
 			}
 
-			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 0,   0, direct_fbo->width(), direct_fbo->height(), fmt::format("RSX Load:                 %3d%%", get_load()));
-			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 0,  18, direct_fbo->width(), direct_fbo->height(), fmt::format("draw calls: %17d", info.stats.draw_calls));
-			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 0,  36, direct_fbo->width(), direct_fbo->height(), fmt::format("draw call setup: %12dus", info.stats.setup_time));
-			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 0,  54, direct_fbo->width(), direct_fbo->height(), fmt::format("vertex upload time: %9dus", info.stats.vertex_upload_time));
-			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 0,  72, direct_fbo->width(), direct_fbo->height(), fmt::format("texture upload time: %8dus", info.stats.textures_upload_time));
-			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 0,  90, direct_fbo->width(), direct_fbo->height(), fmt::format("draw call execution: %8dus", info.stats.draw_exec_time));
-			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 0, 108, direct_fbo->width(), direct_fbo->height(), fmt::format("submit and flip: %12dus", info.stats.flip_time));
+			m_text_writer->set_scale(m_frame->client_device_pixel_ratio());
+
+			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 4,   0, direct_fbo->width(), direct_fbo->height(), fmt::format("RSX Load:                 %3d%%", get_load()));
+			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 4,  18, direct_fbo->width(), direct_fbo->height(), fmt::format("draw calls: %17d", info.stats.draw_calls));
+			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 4,  36, direct_fbo->width(), direct_fbo->height(), fmt::format("draw call setup: %12dus", info.stats.setup_time));
+			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 4,  54, direct_fbo->width(), direct_fbo->height(), fmt::format("vertex upload time: %9dus", info.stats.vertex_upload_time));
+			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 4,  72, direct_fbo->width(), direct_fbo->height(), fmt::format("texture upload time: %8dus", info.stats.textures_upload_time));
+			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 4,  90, direct_fbo->width(), direct_fbo->height(), fmt::format("draw call execution: %8dus", info.stats.draw_exec_time));
+			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 4, 108, direct_fbo->width(), direct_fbo->height(), fmt::format("submit and flip: %12dus", info.stats.flip_time));
 
 			const auto num_dirty_textures = m_texture_cache.get_unreleased_textures_count();
 			const auto texture_memory_size = m_texture_cache.get_texture_memory_in_use() / (1024 * 1024);
@@ -761,11 +763,11 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 			const auto num_texture_upload = m_texture_cache.get_texture_upload_calls_this_frame();
 			const auto num_texture_upload_miss = m_texture_cache.get_texture_upload_misses_this_frame();
 			const auto texture_upload_miss_ratio = m_texture_cache.get_texture_upload_miss_percentage();
-			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 0, 144, direct_fbo->width(), direct_fbo->height(), fmt::format("Unreleased textures: %8d", num_dirty_textures));
-			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 0, 162, direct_fbo->width(), direct_fbo->height(), fmt::format("Texture cache memory: %7dM", texture_memory_size));
-			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 0, 180, direct_fbo->width(), direct_fbo->height(), fmt::format("Temporary texture memory: %3dM", tmp_texture_memory_size));
-			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 0, 198, direct_fbo->width(), direct_fbo->height(), fmt::format("Flush requests: %13d  = %2d (%3d%%) hard faults, %2d unavoidable, %2d misprediction(s), %2d speculation(s)", num_flushes, num_misses, cache_miss_ratio, num_unavoidable, num_mispredict, num_speculate));
-			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 0, 216, direct_fbo->width(), direct_fbo->height(), fmt::format("Texture uploads: %14u (%u from CPU - %02u%%)", num_texture_upload, num_texture_upload_miss, texture_upload_miss_ratio));
+			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 4, 144, direct_fbo->width(), direct_fbo->height(), fmt::format("Unreleased textures: %8d", num_dirty_textures));
+			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 4, 162, direct_fbo->width(), direct_fbo->height(), fmt::format("Texture cache memory: %7dM", texture_memory_size));
+			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 4, 180, direct_fbo->width(), direct_fbo->height(), fmt::format("Temporary texture memory: %3dM", tmp_texture_memory_size));
+			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 4, 198, direct_fbo->width(), direct_fbo->height(), fmt::format("Flush requests: %13d  = %2d (%3d%%) hard faults, %2d unavoidable, %2d misprediction(s), %2d speculation(s)", num_flushes, num_misses, cache_miss_ratio, num_unavoidable, num_mispredict, num_speculate));
+			m_text_writer->print_text(*m_current_command_buffer, *direct_fbo, 4, 216, direct_fbo->width(), direct_fbo->height(), fmt::format("Texture uploads: %14u (%u from CPU - %02u%%)", num_texture_upload, num_texture_upload_miss, texture_upload_miss_ratio));
 		}
 
 		direct_fbo->release();

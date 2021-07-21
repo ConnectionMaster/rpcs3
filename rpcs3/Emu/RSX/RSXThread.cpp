@@ -5,7 +5,6 @@
 #include "Emu/Cell/timers.hpp"
 
 #include "Common/BufferUtils.h"
-#include "Common/GLSLCommon.h"
 #include "Common/texture_cache.h"
 #include "Common/surface_store.h"
 #include "Capture/rsx_capture.h"
@@ -16,13 +15,14 @@
 #include "Emu/Cell/lv2/sys_time.h"
 #include "Emu/Cell/Modules/cellGcmSys.h"
 #include "Overlays/overlay_perf_metrics.h"
+#include "Program/GLSLCommon.h"
 #include "Utilities/date_time.h"
-#include "Utilities/span.h"
 #include "Utilities/StrUtil.h"
 
-#include "util/cereal.hpp"
+#include "util/serialization.hpp"
 #include "util/asm.hpp"
 
+#include <span>
 #include <sstream>
 #include <thread>
 #include <unordered_set>
@@ -38,6 +38,37 @@ rsx::frame_capture_data frame_capture;
 
 extern CellGcmOffsetTable offsetTable;
 extern thread_local std::string(*g_tls_log_prefix)();
+
+template <>
+bool serialize<rsx::rsx_state>(utils::serial& ar, rsx::rsx_state& o)
+{
+	return ar(o.transform_program, /*o.transform_constants,*/ o.registers);
+}
+
+template <>
+bool serialize<rsx::frame_capture_data>(utils::serial& ar, rsx::frame_capture_data& o)
+{
+	ar(o.magic, o.version, o.LE_format);
+
+	if (o.magic != rsx::c_fc_magic || o.version != rsx::c_fc_version || o.LE_format != (std::endian::little == std::endian::native))
+	{
+		return false;
+	}
+
+	return ar(o.tile_map, o.memory_map, o.memory_data_map, o.display_buffers_map, o.replay_commands, o.reg_state);
+}
+
+template <>
+bool serialize<rsx::frame_capture_data::memory_block_data>(utils::serial& ar, rsx::frame_capture_data::memory_block_data& o)
+{
+	return ar(o.data);
+}
+
+template <>
+bool serialize<rsx::frame_capture_data::replay_command>(utils::serial& ar, rsx::frame_capture_data::replay_command& o)
+{
+	return ar(o.rsx_command, o.memory_state, o.tile_state, o.display_buffer_state);
+}
 
 namespace rsx
 {
@@ -390,11 +421,11 @@ namespace rsx
 
 	void thread::capture_frame(const std::string &name)
 	{
-		frame_trace_data::draw_state draw_state = {};
+		frame_trace_data::draw_state draw_state{};
 
 		draw_state.programs = get_programs();
 		draw_state.name = name;
-		frame_debug.draw_calls.push_back(draw_state);
+		frame_debug.draw_calls.emplace_back(std::move(draw_state));
 	}
 
 	void thread::begin()
@@ -506,27 +537,12 @@ namespace rsx
 
 	void thread::cpu_task()
 	{
+		while (Emu.IsReady())
 		{
-			// Wait for startup (TODO)
-			while (m_rsx_thread_exiting)
-			{
-				// Wait for external pause events
-				if (external_interrupt_lock)
-				{
-					wait_pause();
-				}
-
-				thread_ctrl::wait_for(1000);
-
-				if (is_stopped())
-				{
-					return;
-				}
-			}
-
-			on_task();
+			thread_ctrl::wait_for(1000);
 		}
 
+		on_task();
 		on_exit();
 	}
 
@@ -548,7 +564,7 @@ namespace rsx
 		g_tls_log_prefix = []
 		{
 			const auto rsx = get_current_renderer();
-			return fmt::format("RSX [0x%07x]", +rsx->ctrl->get);
+			return fmt::format("RSX [0x%07x]", rsx->ctrl ? +rsx->ctrl->get : 0);
 		};
 
 		method_registers.init();
@@ -558,11 +574,41 @@ namespace rsx
 		g_fxo->get<rsx::dma_manager>().init();
 		on_init_thread();
 
+		is_inited = true;
+		is_inited.notify_all();
+
 		if (!zcull_ctrl)
 		{
 			//Backend did not provide an implementation, provide NULL object
 			zcull_ctrl = std::make_unique<::rsx::reports::ZCULL_control>();
 		}
+
+		performance_counters.state = FIFO_state::empty;
+
+		// Wait for startup (TODO)
+		while (m_rsx_thread_exiting)
+		{
+			// Wait for external pause events
+			if (external_interrupt_lock)
+			{
+				wait_pause();
+			}
+
+			// Execute backend-local tasks first
+			do_local_task(performance_counters.state);
+
+			// Update sub-units
+			zcull_ctrl->update(this);
+
+			if (is_stopped())
+			{
+				return;
+			}
+
+			thread_ctrl::wait_for(1000);
+		}
+
+		performance_counters.state = FIFO_state::running;
 
 		fifo_ctrl = std::make_unique<::rsx::FIFO::FIFO_control>(this);
 
@@ -583,12 +629,13 @@ namespace rsx
 			// TODO: exit condition
 			while (!is_stopped())
 			{
+				const u64 current = get_system_time();
 				const u64 period_time = 1000000 / g_cfg.video.vblank_rate;
-				const u64 wait_sleep = period_time - u64{period_time >= host_min_quantum} * host_min_quantum;
+				const u64 wait_for = period_time - std::min<u64>(current - start_time, period_time);
+				const u64 wait_sleep = wait_for - u64{wait_for >= host_min_quantum} * host_min_quantum;
 
-				if (get_system_time() - start_time >= period_time)
+				if (!wait_for)
 				{
-					do
 					{
 						start_time += period_time;
 						vblank_count++;
@@ -612,10 +659,14 @@ namespace rsx
 							sys_rsx_context_attribute(0x55555555, 0xFED, 1, 0, 0, 0);
 						}
 					}
-					while (get_system_time() - start_time >= period_time);
-
+				}
+				else if (wait_sleep)
+				{
 					thread_ctrl::wait_for(wait_sleep);
-					continue;
+				}
+				else if (wait_for >= host_min_quantum / 3 * 2)
+				{
+					std::this_thread::yield();
 				}
 
 				if (Emu.IsPaused())
@@ -631,8 +682,6 @@ namespace rsx
 					// Restore difference
 					start_time = get_system_time() - start_time;
 				}
-
-				thread_ctrl::wait_for(100);
 			}
 		});
 
@@ -643,9 +692,6 @@ namespace rsx
 		{
 			thread_ctrl::set_thread_affinity_mask(thread_ctrl::get_affinity_mask(thread_class::rsx));
 		}
-
-		// Round to nearest to deal with forward/reverse scaling
-		fesetround(FE_TONEAREST);
 
 		while (!test_stopped())
 		{
@@ -842,19 +888,6 @@ namespace rsx
 		stream_vector(dst + 4, 0u, fog_mode, std::bit_cast<u32>(wpos_scale), std::bit_cast<u32>(wpos_bias));
 	}
 
-	void thread::fill_fragment_texture_parameters(void* buffer, const RSXFragmentProgram& fragment_program)
-	{
-		// Copy only the relevant section
-		if (current_fp_metadata.referenced_textures_mask)
-		{
-			const auto start = std::countr_zero(current_fp_metadata.referenced_textures_mask);
-			const auto end = 16 - std::countl_zero(current_fp_metadata.referenced_textures_mask);
-			const auto mem_offset = (start * 16);
-			const auto mem_size = (end - start) * 16;
-			memcpy(static_cast<u8*>(buffer) + mem_offset, reinterpret_cast<const u8*>(fragment_program.texture_scale) + mem_offset, mem_size);
-		}
-	}
-
 	u64 thread::timestamp()
 	{
 		const u64 freq = sys_time_get_timebase_frequency();
@@ -893,7 +926,7 @@ namespace rsx
 		return t + timestamp_subvalue;
 	}
 
-	gsl::span<const std::byte> thread::get_raw_index_array(const draw_clause& draw_indexed_clause) const
+	std::span<const std::byte> thread::get_raw_index_array(const draw_clause& draw_indexed_clause) const
 	{
 		if (!element_push_buffer.empty())
 		{
@@ -1147,7 +1180,7 @@ namespace rsx
 		case rsx::surface_raster_type::swizzle:
 			packed_render = true;
 			break;
-		};
+		}
 
 		if (!packed_render)
 		{
@@ -1559,6 +1592,7 @@ namespace rsx
 		current_fragment_program.offset = program_offset + current_fp_metadata.program_start_offset;
 		current_fragment_program.ucode_length = current_fp_metadata.program_ucode_length;
 		current_fragment_program.total_length = current_fp_metadata.program_ucode_length + current_fp_metadata.program_start_offset;
+		current_fragment_program.texture_state.import(current_fp_texture_state, current_fp_metadata.referenced_textures_mask);
 		current_fragment_program.valid = true;
 
 		if (!(m_graphics_state & rsx::pipeline_state::fragment_program_state_dirty))
@@ -1597,6 +1631,8 @@ namespace rsx
 			transform_program_start,                    // Address of entry point
 			current_vertex_program                      // [out] Program object
 		);
+
+		current_vertex_program.texture_state.import(current_vp_texture_state, current_vp_metadata.referenced_textures_mask);
 
 		if (!(m_graphics_state & rsx::pipeline_state::vertex_program_state_dirty))
 		{
@@ -1641,9 +1677,12 @@ namespace rsx
 			const auto &tex = rsx::method_registers.vertex_textures[i];
 			if (tex.enabled() && (current_vp_metadata.referenced_textures_mask & (1 << i)))
 			{
-				current_vertex_program.texture_dimensions |= (static_cast<u32>(sampler_descriptors[i]->image_type) << (i << 1));
+				current_vp_texture_state.clear(i);
+				current_vp_texture_state.set_dimension(sampler_descriptors[i]->image_type, i);
 			}
 		}
+
+		current_vertex_program.texture_state.import(current_vp_texture_state, current_vp_metadata.referenced_textures_mask);
 	}
 
 	void thread::analyse_inputs_interleaved(vertex_input_layout& result) const
@@ -1823,13 +1862,7 @@ namespace rsx
 
 		current_fragment_program.ctrl = rsx::method_registers.shader_control() & (CELL_GCM_SHADER_CONTROL_32_BITS_EXPORTS | CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT);
 		current_fragment_program.texcoord_control_mask = rsx::method_registers.texcoord_control_mask();
-		current_fragment_program.texture_dimensions = 0;
-		current_fragment_program.unnormalized_coords = 0;
 		current_fragment_program.two_sided_lighting = rsx::method_registers.two_side_light_en();
-		current_fragment_program.redirected_textures = 0;
-		current_fragment_program.shadow_textures = 0;
-
-		memset(current_fragment_program.texture_scale, 0, sizeof(current_fragment_program.texture_scale));
 
 		if (method_registers.current_draw_clause.primitive == primitive_type::points &&
 			method_registers.point_sprite_enabled())
@@ -1845,14 +1878,15 @@ namespace rsx
 			auto &tex = rsx::method_registers.fragment_textures[i];
 			if (tex.enabled())
 			{
-				current_fragment_program.texture_scale[i][0] = sampler_descriptors[i]->scale_x;
-				current_fragment_program.texture_scale[i][1] = sampler_descriptors[i]->scale_y;
-				current_fragment_program.texture_scale[i][2] = std::bit_cast<f32>(tex.remap());
+				current_fragment_program.texture_params[i].scale_x = sampler_descriptors[i]->scale_x;
+				current_fragment_program.texture_params[i].scale_y = sampler_descriptors[i]->scale_y;
+				current_fragment_program.texture_params[i].remap = tex.remap();
 
 				m_graphics_state |= rsx::pipeline_state::fragment_texture_state_dirty;
 
 				u32 texture_control = 0;
-				current_fragment_program.texture_dimensions |= (static_cast<u32>(sampler_descriptors[i]->image_type) << (i << 1));
+				current_fp_texture_state.clear(i);
+				current_fp_texture_state.set_dimension(sampler_descriptors[i]->image_type, i);
 
 				if (tex.alpha_kill_enabled())
 				{
@@ -1865,7 +1899,7 @@ namespace rsx
 				const u32 format = raw_format & ~(CELL_GCM_TEXTURE_LN | CELL_GCM_TEXTURE_UN);
 
 				if (raw_format & CELL_GCM_TEXTURE_UN)
-					current_fragment_program.unnormalized_coords |= (1 << i);
+					current_fp_texture_state.unnormalized_coords |= (1 << i);
 
 				if (sampler_descriptors[i]->format_class != RSX_FORMAT_CLASS_COLOR)
 				{
@@ -1885,7 +1919,7 @@ namespace rsx
 					case CELL_GCM_TEXTURE_D8R8G8B8:
 					{
 						// Emulate bitcast in shader
-						current_fragment_program.redirected_textures |= (1 << i);
+						current_fp_texture_state.redirected_textures |= (1 << i);
 						const auto float_en = (sampler_descriptors[i]->format_class == RSX_FORMAT_CLASS_DEPTH24_FLOAT_X8_PACK32)? 1 : 0;
 						texture_control |= (float_en << texture_control_bits::DEPTH_FLOAT);
 						break;
@@ -1906,7 +1940,7 @@ namespace rsx
 							compare_mode < rsx::comparison_function::always &&
 							compare_mode > rsx::comparison_function::never)
 						{
-							current_fragment_program.shadow_textures |= (1 << i);
+							current_fp_texture_state.shadow_textures |= (1 << i);
 						}
 						break;
 					}
@@ -1983,9 +2017,12 @@ namespace rsx
 #ifdef __APPLE__
 				texture_control |= (sampler_descriptors[i]->encoded_component_map() << 16);
 #endif
-				current_fragment_program.texture_scale[i][3] = std::bit_cast<f32>(texture_control);
+				current_fragment_program.texture_params[i].control = texture_control;
 			}
 		}
+
+		// Update texture configuration
+		current_fragment_program.texture_state.import(current_fp_texture_state, current_fp_metadata.referenced_textures_mask);
 
 		//Sanity checks
 		if (current_fragment_program.ctrl & CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT)
@@ -2028,40 +2065,6 @@ namespace rsx
 		std::memset(display_buffers, 0, sizeof(display_buffers));
 
 		m_rsx_thread_exiting = false;
-	}
-
-	GcmTileInfo *thread::find_tile(u32 offset, u32 location)
-	{
-		for (GcmTileInfo &tile : tiles)
-		{
-			if (!tile.bound || (tile.location & 1) != (location & 1))
-			{
-				continue;
-			}
-
-			if (offset >= tile.offset && offset < tile.offset + tile.size)
-			{
-				return &tile;
-			}
-		}
-
-		return nullptr;
-	}
-
-	tiled_region thread::get_tiled_address(u32 offset, u32 location)
-	{
-		u32 address = get_address(offset, location);
-
-		GcmTileInfo *tile = find_tile(offset, location);
-		u32 base = 0;
-
-		if (tile)
-		{
-			base = offset - tile->offset;
-			address = get_address(tile->offset, location);
-		}
-
-		return{ address, base, tile, vm::_ptr<u8>(address) };
 	}
 
 	std::pair<u32, u32> thread::calculate_memory_requirements(const vertex_input_layout& layout, u32 first_vertex, u32 vertex_count)
@@ -2160,7 +2163,7 @@ namespace rsx
 		const s32 default_frequency_mask = (1 << 8);
 		const s32 swap_storage_mask = (1 << 29);
 		const s32 volatile_storage_mask = (1 << 30);
-		const s32 modulo_op_frequency_mask = (INT32_MIN);
+		const s32 modulo_op_frequency_mask = smin;
 
 		const u32 modulo_mask = rsx::method_registers.frequency_divider_operation_mask();
 		const auto max_index = (first_vertex + vertex_count) - 1;
@@ -2279,27 +2282,14 @@ namespace rsx
 				}
 			} //end attribute placement check
 
-			// If data is passed via registers, it is already received in little endian
-			const bool is_be_type = (layout.attribute_placement[index] != attribute_buffer_placement::transient);
-			bool to_swap_bytes = is_be_type;
-
-			switch (type)
+			// Special compressed 4 components into one 4-byte value. Decoded as one value.
+			if (type == rsx::vertex_base_type::cmp)
 			{
-			case rsx::vertex_base_type::cmp:
-				// Compressed 4 components into one 4-byte value
 				size = 1;
-				break;
-			case rsx::vertex_base_type::ub:
-			case rsx::vertex_base_type::ub256:
-				// These are single byte formats, but inverted order (BGRA vs ARGB) when passed via registers
-				to_swap_bytes = (layout.attribute_placement[index] == attribute_buffer_placement::transient);
-				break;
-			default:
-				break;
 			}
 
-			if (to_swap_bytes) attrib1 |= swap_storage_mask;
-
+			// All data is passed in in PS3-native order (BE) so swap flag should be set
+			attrib1 |= swap_storage_mask;
 			attrib0 |= (static_cast<s32>(type) << 24);
 			attrib0 |= (size << 27);
 			attrib1 |= offset_in_block[index];
@@ -2745,7 +2735,7 @@ namespace rsx
 					{
 						// Each 64 entries are grouped by a bit
 						const u64 io_event = SYS_RSX_EVENT_UNMAPPED_BASE << i;
-						g_fxo->get<lv2_rsx_config>().send_event(0, io_event, to_unmap);
+						send_event(0, io_event, to_unmap);
 					}
 				}
 			}
@@ -2892,11 +2882,14 @@ namespace rsx
 			const std::string file_path = fs::get_config_dir() + "captures/" + Emu.GetTitleID() + "_" + date_time::current_time_narrow() + "_capture.rrc";
 
 			// todo: may want to compress this data?
-			const std::string file_data = cereal_serialize(frame_capture);
+			utils::serial save_manager;
+			save_manager.reserve(0x800'0000); // 128MB
+
+			save_manager(frame_capture);
 
 			fs::pending_file temp(file_path);
 
-			if (temp.file && (temp.file.write(file_data), temp.commit(false)))
+			if (temp.file && (temp.file.write(save_manager.data), temp.commit(false)))
 			{
 				rsx_log.success("Capture successful: %s", file_path);
 			}
@@ -3352,17 +3345,17 @@ namespace rsx
 			switch (type)
 			{
 			case CELL_GCM_ZPASS_PIXEL_CNT:
-				value = value ? UINT16_MAX : 0;
+				value = value ? u16{umax} : 0;
 				break;
 			case CELL_GCM_ZCULL_STATS3:
-				value = value ? 0 : UINT16_MAX;
+				value = value ? 0 : u16{umax};
 				break;
 			case CELL_GCM_ZCULL_STATS2:
 			case CELL_GCM_ZCULL_STATS1:
 			case CELL_GCM_ZCULL_STATS:
 			default:
 				//Not implemented
-				value = UINT32_MAX;
+				value = -1;
 				break;
 			}
 

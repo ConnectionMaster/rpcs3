@@ -4,6 +4,7 @@
 #include "vkutils/device.h"
 
 #include "Emu/Memory/vm.h"
+#include "Emu/RSX/RSXThread.h"
 #include "Utilities/mutex.h"
 
 #include "util/asm.hpp"
@@ -33,10 +34,16 @@ namespace vk
 			return inheritance_info.parent->map_range(range);
 		}
 
+		if (memory_mapping == nullptr)
+		{
+			memory_mapping = static_cast<u8*>(allocated_memory->map(0, VK_WHOLE_SIZE));
+			ensure(memory_mapping);
+		}
+
 		ensure(range.start >= base_address);
 		u32 start = range.start;
 		start -= base_address;
-		return allocated_memory->map(start, range.length());
+		return memory_mapping + start;
 	}
 
 	void dma_block::unmap()
@@ -48,6 +55,7 @@ namespace vk
 		else
 		{
 			allocated_memory->unmap();
+			memory_mapping = nullptr;
 		}
 	}
 
@@ -59,7 +67,8 @@ namespace vk
 
 		allocated_memory = std::make_unique<vk::buffer>(dev, size,
 			dev.get_memory_mapping().host_visible_coherent, VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-			VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, 0);
+			VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, 0,
+			VMM_ALLOCATION_POOL_UNDEFINED);
 
 		s_allocated_dma_pool_size += allocated_memory->size();
 	}
@@ -68,8 +77,20 @@ namespace vk
 	{
 		if (allocated_memory)
 		{
+			// Do some accounting before the allocation info is no more
 			s_allocated_dma_pool_size -= allocated_memory->size();
 
+			// If you have both a memory allocation AND a parent block at the same time, you're in trouble
+			ensure(head() == this);
+
+			if (memory_mapping)
+			{
+				// vma allocator does not allow us to destroy mapped memory on windows
+				unmap();
+				ensure(!memory_mapping);
+			}
+
+			// Move allocation to gc
 			auto gc = vk::get_resource_manager();
 			gc->dispose(allocated_memory);
 		}
@@ -106,8 +127,7 @@ namespace vk
 		auto dst = vm::get_super_ptr(range.start);
 		std::memcpy(dst, src, range.length());
 
-		// TODO: Clear page bits
-		unmap();
+		// NOTE: Do not unmap. This can be extremely slow on some platforms.
 	}
 
 	void dma_block::load(const utils::address_range& range)
@@ -123,8 +143,7 @@ namespace vk
 		auto dst = map_range(range);
 		std::memcpy(dst, src, range.length());
 
-		// TODO: Clear page bits to sychronized
-		unmap();
+		// NOTE: Do not unmap. This can be extremely slow on some platforms.
 	}
 
 	std::pair<u32, buffer*> dma_block::get(const utils::address_range& range)
@@ -167,15 +186,15 @@ namespace vk
 			return;
 		}
 
-		inheritance_info.parent = parent;
-		inheritance_info.block_offset = (base_address - parent->base_address);
-
 		if (allocated_memory)
 		{
 			// Acquired blocks are always to be assumed dirty. It is not possible to synchronize host access and inline
 			// buffer copies without causing weird issues. Overlapped incomplete data ends up overwriting host-uploaded data.
 			free();
 		}
+
+		inheritance_info.parent = parent;
+		inheritance_info.block_offset = (base_address - parent->base_address);
 	}
 
 	void dma_block::extend(const render_device& dev, usz new_size)
@@ -255,33 +274,24 @@ namespace vk
 
 	void create_dma_block(std::unique_ptr<dma_block>& block, u32 base_address, usz expected_length)
 	{
-		const auto vendor = g_render_device->gpu().get_driver_vendor();
-		[[maybe_unused]] const auto chip  = g_render_device->gpu().get_chip_class();
-
-#ifdef _WIN32
-		bool allow_host_buffers;
-		if (vendor == driver_vendor::NVIDIA)
+		bool allow_host_buffers = false;
+		if (rsx::get_current_renderer()->get_backend_config().supports_passthrough_dma)
 		{
-			if (g_cfg.video.vk.asynchronous_texture_streaming)
-			{
-				allow_host_buffers = (chip != chip_class::NV_mobile_kepler) ?
+			allow_host_buffers =
+#if defined(_WIN32)
+				(vk::get_driver_vendor() == driver_vendor::NVIDIA) ?
 					test_host_pointer(base_address, expected_length) :
-					false;
-			}
-			else
-			{
-				allow_host_buffers = false;
-			}
-		}
-		else
-		{
-			allow_host_buffers = true;
-		}
-#else
-		// Anything running on AMDGPU kernel driver will not work due to the check for fd-backed memory allocations
-		const bool allow_host_buffers = (vendor != driver_vendor::AMD && vendor != driver_vendor::RADV);
 #endif
-		if (allow_host_buffers && g_render_device->get_external_memory_host_support())
+				true;
+
+			if (!allow_host_buffers)
+			{
+				rsx_log.trace("Requested DMA passthrough for block 0x%x->0x%x but this was not possible.",
+					base_address, base_address + expected_length - 1);
+			}
+		}
+
+		if (allow_host_buffers)
 		{
 			block.reset(new dma_block_EXT());
 		}

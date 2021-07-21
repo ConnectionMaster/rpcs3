@@ -4,6 +4,7 @@
 #include "table_item_delegate.h"
 #include "Emu/RSX/RSXThread.h"
 #include "Emu/RSX/gcm_printing.h"
+#include "util/asm.hpp"
 
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -13,6 +14,8 @@
 #include <QPushButton>
 #include <QKeyEvent>
 
+#include <span>
+
 enum GCMEnumTypes
 {
 	CELL_GCM_ENUM,
@@ -21,18 +24,18 @@ enum GCMEnumTypes
 
 constexpr auto qstr = QString::fromStdString;
 
-namespace
+namespace utils
 {
-	template <typename T>
-	gsl::span<T> as_const_span(gsl::span<const std::byte> unformated_span)
+	template <typename T, typename U>
+	[[nodiscard]] auto bless(const std::span<U>& span)
 	{
-		return{ reinterpret_cast<T*>(unformated_span.data()), unformated_span.size_bytes() / sizeof(T) };
+		return std::span<T>(bless<T>(span.data()), sizeof(U) * span.size() / sizeof(T));
 	}
 }
 
 rsx_debugger::rsx_debugger(std::shared_ptr<gui_settings> gui_settings, QWidget* parent)
 	: QDialog(parent)
-	, m_gui_settings(gui_settings)
+	, m_gui_settings(std::move(gui_settings))
 {
 	setWindowTitle(tr("RSX Debugger"));
 	setObjectName("rsx_debugger");
@@ -256,10 +259,6 @@ rsx_debugger::rsx_debugger(std::shared_ptr<gui_settings> gui_settings, QWidget* 
 		UpdateInformation();
 }
 
-rsx_debugger::~rsx_debugger()
-{
-}
-
 void rsx_debugger::closeEvent(QCloseEvent* event)
 {
 	// Save header states and window geometry
@@ -275,7 +274,7 @@ void rsx_debugger::closeEvent(QCloseEvent* event)
 
 void rsx_debugger::keyPressEvent(QKeyEvent* event)
 {
-	if (isActiveWindow())
+	if (isActiveWindow() && !event->isAutoRepeat())
 	{
 		switch (event->key())
 		{
@@ -371,7 +370,7 @@ void Buffer::showImage(const QImage& image)
 	setLayout(new_layout);
 }
 
-void Buffer::ShowWindowed()
+void Buffer::ShowWindowed() const
 {
 	//const auto render = rsx::get_current_renderer();
 	if (!g_fxo->is_init<rsx::thread>())
@@ -399,7 +398,6 @@ void Buffer::ShowWindowed()
 	//			render->textures[m_cur_texture].width(),
 	//			render->textures[m_cur_texture].height(), false);
 	//}
-	return;
 }
 
 namespace
@@ -411,24 +409,24 @@ namespace
 
 		const u16 _u16 = static_cast<u16>(val);
 		const u32 raw = ((_u16 & 0x8000) << 16) |             // Sign (just moved)
-				  (((_u16 & 0x7c00) + 0x1C000) << 13) | // Exponent ( exp - 15 + 127)
-				  ((_u16 & 0x03FF) << 13);              // Mantissa
+		                (((_u16 & 0x7c00) + 0x1C000) << 13) | // Exponent ( exp - 15 + 127)
+		                ((_u16 & 0x03FF) << 13);              // Mantissa
 
 		return std::bit_cast<f32>(raw);
 	}
 
-	std::array<u8, 3> get_value(gsl::span<const std::byte> orig_buffer, rsx::surface_color_format format, usz idx)
+	std::array<u8, 3> get_value(std::span<const std::byte> orig_buffer, rsx::surface_color_format format, usz idx)
 	{
 		switch (format)
 		{
 		case rsx::surface_color_format::b8:
 		{
-			const u8 value = as_const_span<const u8>(orig_buffer)[idx];
+			const u8 value = utils::bless<const u8>(orig_buffer)[idx];
 			return{ value, value, value };
 		}
 		case rsx::surface_color_format::x32:
 		{
-			const be_t<u32> stored_val = as_const_span<const be_t<u32>>(orig_buffer)[idx];
+			const be_t<u32> stored_val = utils::bless<const be_t<u32>>(orig_buffer)[idx];
 			const u32 swapped_val = stored_val;
 			const f32 float_val = std::bit_cast<f32>(swapped_val);
 			const u8 val = float_val * 255.f;
@@ -438,29 +436,29 @@ namespace
 		case rsx::surface_color_format::x8b8g8r8_o8b8g8r8:
 		case rsx::surface_color_format::x8b8g8r8_z8b8g8r8:
 		{
-			const auto ptr = as_const_span<const u8>(orig_buffer);
+			const auto ptr = utils::bless<const u8>(orig_buffer);
 			return{ ptr[1 + idx * 4], ptr[2 + idx * 4], ptr[3 + idx * 4] };
 		}
 		case rsx::surface_color_format::a8r8g8b8:
 		case rsx::surface_color_format::x8r8g8b8_o8r8g8b8:
 		case rsx::surface_color_format::x8r8g8b8_z8r8g8b8:
 		{
-			const auto ptr = as_const_span<const u8>(orig_buffer);
+			const auto ptr = utils::bless<const u8>(orig_buffer);
 			return{ ptr[3 + idx * 4], ptr[2 + idx * 4], ptr[1 + idx * 4] };
 		}
 		case rsx::surface_color_format::w16z16y16x16:
 		{
-			const auto ptr = as_const_span<const u16>(orig_buffer);
-			const f16 h0 = f16(ptr[4 * idx]);
-			const f16 h1 = f16(ptr[4 * idx + 1]);
-			const f16 h2 = f16(ptr[4 * idx + 2]);
+			const auto ptr = utils::bless<const u16>(orig_buffer);
+			const f16 h0 = static_cast<f16>(ptr[4 * idx]);
+			const f16 h1 = static_cast<f16>(ptr[4 * idx + 1]);
+			const f16 h2 = static_cast<f16>(ptr[4 * idx + 2]);
 			const f32 f0 = f16_to_f32(h0);
 			const f32 f1 = f16_to_f32(h1);
 			const f32 f2 = f16_to_f32(h2);
 
-			const u8 val0 = f0 * 255.;
-			const u8 val1 = f1 * 255.;
-			const u8 val2 = f2 * 255.;
+			const u8 val0 = f0 * 255.f;
+			const u8 val1 = f1 * 255.f;
+			const u8 val2 = f2 * 255.f;
 			return{ val0, val1, val2 };
 		}
 		case rsx::surface_color_format::g8b8:
@@ -476,9 +474,13 @@ namespace
 	/**
 	 * Return a new buffer that can be passed to QImage.
 	 */
-	u8* convert_to_QImage_buffer(rsx::surface_color_format format, gsl::span<const std::byte> orig_buffer, usz width, usz height) noexcept
+	u8* convert_to_QImage_buffer(rsx::surface_color_format format, std::span<const std::byte> orig_buffer, usz width, usz height) noexcept
 	{
 		u8* buffer = static_cast<u8*>(std::malloc(width * height * 4));
+		if (!buffer || width == 0 || height == 0)
+		{
+			return nullptr;
+		}
 		for (u32 i = 0; i < width * height; i++)
 		{
 			// depending on original buffer, the colors may need to be reversed
@@ -522,7 +524,7 @@ void rsx_debugger::OnClickDrawCalls()
 	{
 		if (width && height && !draw_call.depth_stencil[0].empty())
 		{
-			gsl::span<const std::byte> orig_buffer = draw_call.depth_stencil[0];
+			const std::span<const std::byte> orig_buffer = draw_call.depth_stencil[0];
 			u8* buffer = static_cast<u8*>(std::malloc(4ULL * width * height));
 
 			if (draw_call.state.surface_depth_fmt() == rsx::surface_depth_format::z24s8)
@@ -531,7 +533,7 @@ void rsx_debugger::OnClickDrawCalls()
 				{
 					for (u32 col = 0; col < width; col++)
 					{
-						const u32 depth_val = as_const_span<const u32>(orig_buffer)[row * width + col];
+						const u32 depth_val = utils::bless<const u32>(orig_buffer)[row * width + col];
 						const u8 displayed_depth_val = 255 * depth_val / 0xFFFFFF;
 						buffer[4 * col + 0 + width * row * 4] = displayed_depth_val;
 						buffer[4 * col + 1 + width * row * 4] = displayed_depth_val;
@@ -546,7 +548,7 @@ void rsx_debugger::OnClickDrawCalls()
 				{
 					for (u32 col = 0; col < width; col++)
 					{
-						const u16 depth_val = as_const_span<const u16>(orig_buffer)[row * width + col];
+						const u16 depth_val = utils::bless<const u16>(orig_buffer)[row * width + col];
 						const u8 displayed_depth_val = 255 * depth_val / 0xFFFF;
 						buffer[4 * col + 0 + width * row * 4] = displayed_depth_val;
 						buffer[4 * col + 1 + width * row * 4] = displayed_depth_val;
@@ -563,14 +565,14 @@ void rsx_debugger::OnClickDrawCalls()
 	{
 		if (width && height && !draw_call.depth_stencil[1].empty())
 		{
-			gsl::span<const std::byte> orig_buffer = draw_call.depth_stencil[1];
+			const std::span<const std::byte> orig_buffer = draw_call.depth_stencil[1];
 			u8* buffer = static_cast<u8*>(std::malloc(4ULL * width * height));
 
 			for (u32 row = 0; row < height; row++)
 			{
 				for (u32 col = 0; col < width; col++)
 				{
-					const u8 stencil_val = as_const_span<const u8>(orig_buffer)[row * width + col];
+					const u8 stencil_val = utils::bless<const u8>(orig_buffer)[row * width + col];
 					buffer[4 * col + 0 + width * row * 4] = stencil_val;
 					buffer[4 * col + 1 + width * row * 4] = stencil_val;
 					buffer[4 * col + 2 + width * row * 4] = stencil_val;
@@ -607,16 +609,16 @@ void rsx_debugger::OnClickDrawCalls()
 	}
 }
 
-void rsx_debugger::UpdateInformation()
+void rsx_debugger::UpdateInformation() const
 {
 	m_addr_line->setText(QString("%1").arg(m_addr, 8, 16, QChar('0'))); // get 8 digits in input line
 	GetMemory();
 	GetBuffers();
 }
 
-void rsx_debugger::GetMemory()
+void rsx_debugger::GetMemory() const
 {
-	int item_count = m_list_commands->rowCount();
+	const int item_count = m_list_commands->rowCount();
 
 	// Write information
 	for (int i = 0, addr = m_addr; i < item_count; i++, addr += 4)
@@ -656,13 +658,16 @@ void rsx_debugger::GetMemory()
 		dump += '\n';
 	}
 
-	fs::file(fs::get_cache_dir() + "command_dump.log", fs::rewrite).write(dump);
+	if (fs::file file = fs::file(fs::get_cache_dir() + "command_dump.log", fs::rewrite))
+	{
+		file.write(dump);
+	}
 
 	for (u32 i = 0;i < frame_debug.draw_calls.size(); i++)
 		m_list_captured_draw_calls->setItem(i, 0, new QTableWidgetItem(qstr(frame_debug.draw_calls[i].name)));
 }
 
-void rsx_debugger::GetBuffers()
+void rsx_debugger::GetBuffers() const
 {
 	const auto render = rsx::get_current_renderer();
 	if (!render)
@@ -674,7 +679,7 @@ void rsx_debugger::GetBuffers()
 	// TODO: Currently it only supports color buffers
 	for (u32 bufferId=0; bufferId < render->display_buffers_count; bufferId++)
 	{
-		auto buffers = render->display_buffers;
+		const auto buffers = render->display_buffers;
 		const u32 rsx_buffer_addr = rsx::constants::local_mem_base + buffers[bufferId].offset;
 
 		const u32 width  = buffers[bufferId].width;
@@ -740,7 +745,7 @@ void rsx_debugger::GetBuffers()
 	//m_buffer_tex->showImage(QImage(buffer, m_text_width, m_text_height, QImage::Format_RGB32));
 }
 
-QString rsx_debugger::DisAsmCommand(u32 cmd, u32 count, u32 ioAddr)
+QString rsx_debugger::DisAsmCommand(u32 cmd, u32 count, u32 ioAddr) const
 {
 	std::string disasm;
 
@@ -750,31 +755,31 @@ QString rsx_debugger::DisAsmCommand(u32 cmd, u32 count, u32 ioAddr)
 	{
 		if ((cmd & RSX_METHOD_OLD_JUMP_CMD_MASK) == RSX_METHOD_OLD_JUMP_CMD)
 		{
-			u32 jumpAddr = cmd & RSX_METHOD_OLD_JUMP_OFFSET_MASK;
-			DISASM("JUMP to 0x%07x", jumpAddr);
+			const u32 jump_addr = cmd & RSX_METHOD_OLD_JUMP_OFFSET_MASK;
+			DISASM("JUMP to 0x%07x", jump_addr)
 		}
 		else if ((cmd & RSX_METHOD_NEW_JUMP_CMD_MASK) == RSX_METHOD_NEW_JUMP_CMD)
 		{
-			u32 jumpAddr = cmd & RSX_METHOD_NEW_JUMP_OFFSET_MASK;
-			DISASM("JUMP to 0x%07x", jumpAddr);
+			const u32 jump_addr = cmd & RSX_METHOD_NEW_JUMP_OFFSET_MASK;
+			DISASM("JUMP to 0x%07x", jump_addr)
 		}
 		else if ((cmd & RSX_METHOD_CALL_CMD_MASK) == RSX_METHOD_CALL_CMD)
 		{
-			u32 callAddr = cmd & RSX_METHOD_CALL_OFFSET_MASK;
-			DISASM("CALL to 0x%07x", callAddr);
+			const u32 jump_addr = cmd & RSX_METHOD_CALL_OFFSET_MASK;
+			DISASM("CALL to 0x%07x", jump_addr)
 		}
 		else if ((cmd & RSX_METHOD_RETURN_MASK) == RSX_METHOD_RETURN_CMD)
 		{
-			DISASM("RETURN");
+			DISASM("RETURN")
 		}
 		else
 		{
-			DISASM("Not a command");
+			DISASM("Not a command")
 		}
 	}
 	else if ((cmd & RSX_METHOD_NOP_MASK) == RSX_METHOD_NOP_CMD)
 	{
-		DISASM("NOP");
+		DISASM("NOP")
 	}
 	else
 	{
@@ -786,24 +791,24 @@ QString rsx_debugger::DisAsmCommand(u32 cmd, u32 count, u32 ioAddr)
 		{
 		case 0x3fead:
 		{
-			DISASM("Flip and change current buffer: %d", args[0]);
+			DISASM("Flip and change current buffer: %d", args[0])
 			break;
 		}
 		default:
 		{
 			const u32 id = (cmd & 0x3ffff) >> 2;
-			std::string str = rsx::get_pretty_printing_function(id)(id, args[0]);
-			DISASM("%s", str.c_str());
+			const std::string str = rsx::get_pretty_printing_function(id)(id, args[0]);
+			DISASM("%s", str.c_str())
 			break;
 		}
 		}
 
 		if ((cmd & RSX_METHOD_NON_INCREMENT_CMD_MASK) == RSX_METHOD_NON_INCREMENT_CMD && count > 1)
 		{
-			DISASM("Non Increment cmd");
+			DISASM("Non Increment cmd")
 		}
 
-		DISASM("(");
+		DISASM("(")
 
 		for (uint i=0; i<count; ++i)
 		{

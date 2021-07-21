@@ -65,24 +65,32 @@ void fmt_class_string<logs::level>::format(std::string& out, u64 arg)
 
 namespace logs
 {
+	static_assert(std::is_empty_v<message> && sizeof(message) == 1);
+	static_assert(sizeof(channel) == alignof(channel));
+	static_assert(uchar(level::always) == 0);
+	static_assert(uchar(level::fatal) == 1);
+	static_assert(uchar(level::trace) == 7);
+	static_assert((offsetof(channel, fatal) & 7) == 1);
+	static_assert((offsetof(channel, trace) & 7) == 7);
+
 	// Memory-mapped buffer size
 	constexpr u64 s_log_size = 32 * 1024 * 1024;
 
 	class file_writer
 	{
-		std::thread m_writer;
-		fs::file m_fout;
-		fs::file m_fout2;
-		u64 m_max_size;
+		std::thread m_writer{};
+		fs::file m_fout{};
+		fs::file m_fout2{};
+		u64 m_max_size{};
 
-		std::unique_ptr<uchar[]> m_fptr;
+		std::unique_ptr<uchar[]> m_fptr{};
 		z_stream m_zs{};
-		shared_mutex m_m;
+		shared_mutex m_m{};
 
 		alignas(128) atomic_t<u64> m_buf{0}; // MSB (40 bit): push begin, LSB (24 bis): push size
 		alignas(128) atomic_t<u64> m_out{0}; // Amount of bytes written to file
 
-		uchar m_zout[65536];
+		uchar m_zout[65536]{};
 
 		// Write buffered logs immediately
 		bool flush(u64 bufv);
@@ -118,10 +126,10 @@ namespace logs
 		}
 
 		// Channel registry
-		std::unordered_multimap<std::string, channel*> channels;
+		std::unordered_multimap<std::string, channel*> channels{};
 
 		// Messages for delayed listener initialization
-		std::vector<stored_message> messages;
+		std::vector<stored_message> messages{};
 	};
 
 	static root_listener* get_logger()
@@ -618,7 +626,7 @@ void logs::file_listener::log(u64 stamp, const logs::message& msg, const std::st
 	text.reserve(50000);
 
 	// Used character: U+00B7 (Middle Dot)
-	switch (msg.sev)
+	switch (msg)
 	{
 	case level::always:  text = reinterpret_cast<const char*>(u8"·A "); break;
 	case level::fatal:   text = reinterpret_cast<const char*>(u8"·F "); break;
@@ -637,7 +645,7 @@ void logs::file_listener::log(u64 stamp, const logs::message& msg, const std::st
 	const u64 frac = (stamp % 1'000'000);
 	fmt::append(text, "%u:%02u:%02u.%06u ", hours, mins, secs, frac);
 
-	if (msg.ch == nullptr && stamp == 0)
+	if (stamp == 0)
 	{
 		// Workaround for first special messages to keep backward compatibility
 		text.clear();
@@ -650,12 +658,12 @@ void logs::file_listener::log(u64 stamp, const logs::message& msg, const std::st
 		text += "} ";
 	}
 
-	if (msg.ch && '\0' != *msg.ch->name)
+	if (stamp && msg->name && '\0' != *msg->name)
 	{
-		text += msg.ch->name;
-		text += msg.sev == level::todo ? " TODO: " : ": ";
+		text += msg->name;
+		text += msg == level::todo ? " TODO: " : ": ";
 	}
-	else if (msg.sev == level::todo)
+	else if (msg == level::todo)
 	{
 		text += "TODO: ";
 	}

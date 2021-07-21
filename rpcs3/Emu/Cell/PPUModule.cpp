@@ -114,20 +114,20 @@ struct ppu_linkage_info
 			ppu_static_function* static_func = nullptr;
 			ppu_static_variable* static_var = nullptr;
 			u32 export_addr = 0;
-			std::set<u32> imports;
-			std::set<u32> frefss;
+			std::set<u32> imports{};
+			std::set<u32> frefss{};
 		};
 
 		// FNID -> (export; [imports...])
-		std::unordered_map<u32, info, value_hash<u32>> functions;
-		std::unordered_map<u32, info, value_hash<u32>> variables;
+		std::unordered_map<u32, info, value_hash<u32>> functions{};
+		std::unordered_map<u32, info, value_hash<u32>> variables{};
 
 		// Obsolete
 		bool imported = false;
 	};
 
 	// Module map
-	std::unordered_map<std::string, module_data> modules;
+	std::unordered_map<std::string, module_data> modules{};
 };
 
 // Initialize static modules.
@@ -228,6 +228,7 @@ static void ppu_initialize_modules(ppu_linkage_info* link)
 		&ppu_module_manager::cellVpost,
 		&ppu_module_manager::libad_async,
 		&ppu_module_manager::libad_core,
+		&ppu_module_manager::libfs_utility_init,
 		&ppu_module_manager::libmedi,
 		&ppu_module_manager::libmixer,
 		&ppu_module_manager::libsnd3,
@@ -253,14 +254,16 @@ static void ppu_initialize_modules(ppu_linkage_info* link)
 	// Initialize double-purpose fake OPD array for HLE functions
 	const auto& hle_funcs = ppu_function_manager::get(g_cfg.core.ppu_decoder == ppu_decoder_type::llvm);
 
+	u32& hle_funcs_addr = g_fxo->get<ppu_function_manager>().addr;
+
 	// Allocate memory for the array (must be called after fixed allocations)
-	ppu_function_manager::addr = vm::alloc(::size32(hle_funcs) * 8, vm::main);
+	hle_funcs_addr = vm::alloc(::size32(hle_funcs) * 8, vm::main);
 
 	// Initialize as PPU executable code
-	ppu_register_range(ppu_function_manager::addr, ::size32(hle_funcs) * 8);
+	ppu_register_range(hle_funcs_addr, ::size32(hle_funcs) * 8);
 
 	// Fill the array (visible data: self address and function index)
-	for (u32 addr = ppu_function_manager::addr, index = 0; index < hle_funcs.size(); addr += 8, index++)
+	for (u32 addr = hle_funcs_addr, index = 0; index < hle_funcs.size(); addr += 8, index++)
 	{
 		// Function address = next CIA, RTOC = 0 (vm::null)
 		vm::write32(addr + 0, addr + 4);
@@ -272,7 +275,7 @@ static void ppu_initialize_modules(ppu_linkage_info* link)
 	}
 
 	// Set memory protection to read-only
-	vm::page_protect(ppu_function_manager::addr, utils::align(::size32(hle_funcs) * 8, 0x1000), 0, 0, vm::page_writable);
+	vm::page_protect(hle_funcs_addr, utils::align(::size32(hle_funcs) * 8, 0x1000), 0, 0, vm::page_writable);
 
 	// Initialize function names
 	const bool is_first = g_ppu_function_names.empty();
@@ -304,7 +307,7 @@ static void ppu_initialize_modules(ppu_linkage_info* link)
 
 			if (is_first)
 			{
-				g_ppu_function_names[function.second.index] = fmt::format("%s.%s", _module->name, function.second.name);
+				g_ppu_function_names[function.second.index] = fmt::format("%s:%s", function.second.name, _module->name);
 			}
 
 			if ((function.second.flags & MFF_HIDDEN) == 0)
@@ -312,7 +315,7 @@ static void ppu_initialize_modules(ppu_linkage_info* link)
 				auto& flink = linkage.functions[function.first];
 
 				flink.static_func = &function.second;
-				flink.export_addr = ppu_function_manager::func_addr(function.second.index);
+				flink.export_addr = g_fxo->get<ppu_function_manager>().func_addr(function.second.index);
 				function.second.export_addr = &flink.export_addr;
 			}
 		}
@@ -363,6 +366,59 @@ static void ppu_initialize_modules(ppu_linkage_info* link)
 			}
 		}
 	}
+}
+
+// For the debugger (g_ppu_function_names shouldn't change, string_view should suffice)
+extern const std::unordered_map<u32, std::string_view>& get_exported_function_names_as_addr_indexed_map()
+{
+	static std::unordered_map<u32, std::string_view> res;
+	static u64 update_time = 0;
+
+	const auto link = g_fxo->try_get<ppu_linkage_info>();
+	const auto hle_funcs = g_fxo->try_get<ppu_function_manager>();
+
+	if (!link || !hle_funcs)
+	{
+		res.clear();
+		return res;
+	}
+
+	const u64 current_time = get_system_time();
+
+	// Update list every >=0.1 seconds
+	if (current_time - update_time < 100'000)
+	{
+		return res;
+	}
+
+	update_time = current_time;
+
+	res.clear();
+	res.reserve(ppu_module_manager::get().size());
+
+	for (auto& pair : ppu_module_manager::get())
+	{
+		const auto _module = pair.second;
+		auto& linkage = link->modules[_module->name];
+
+		for (auto& function : _module->functions)
+		{
+			auto& flink = linkage.functions[function.first];
+			u32 addr = flink.export_addr;
+
+			if (vm::check_addr<4>(addr, vm::page_readable) && addr != hle_funcs->func_addr(function.second.index))
+			{
+				addr = vm::read32(addr);
+
+				if (!(addr % 4) && vm::check_addr<4>(addr, vm::page_executable))
+				{
+					res.try_emplace(addr, g_ppu_function_names[function.second.index]);
+				}
+			}
+		}
+	}
+
+	return res;
 }
 
 // Resolve relocations for variable/function linkage.
@@ -512,7 +568,7 @@ static auto ppu_load_exports(ppu_linkage_info* link, u32 exports_start, u32 expo
 			// Function linkage info
 			auto& flink = mlink.functions[fnid];
 
-			if (flink.static_func && flink.export_addr == ppu_function_manager::func_addr(flink.static_func->index))
+			if (flink.static_func && flink.export_addr == g_fxo->get<ppu_function_manager>().func_addr(flink.static_func->index))
 			{
 				flink.export_addr = 0;
 			}
@@ -530,7 +586,7 @@ static auto ppu_load_exports(ppu_linkage_info* link, u32 exports_start, u32 expo
 				{
 					// Inject a branch to the HLE implementation
 					const u32 _entry = vm::read32(faddr);
-					const u32 target = ppu_function_manager::func_addr(_sf->index) + 4;
+					const u32 target = g_fxo->get<ppu_function_manager>().func_addr(_sf->index) + 4;
 
 					// Set exported function
 					flink.export_addr = target - 4;
@@ -654,7 +710,7 @@ static auto ppu_load_imports(std::vector<ppu_reloc>& relocs, ppu_linkage_info* l
 			mlink.imported = true;
 
 			// Link address (special HLE function by default)
-			const u32 link_addr = flink.export_addr ? flink.export_addr : ppu_function_manager::addr;
+			const u32 link_addr = flink.export_addr ? flink.export_addr : g_fxo->get<ppu_function_manager>().addr;
 
 			// Write import table
 			vm::write32(faddr, link_addr);
@@ -697,6 +753,16 @@ static auto ppu_load_imports(std::vector<ppu_reloc>& relocs, ppu_linkage_info* l
 	}
 
 	return result;
+}
+
+// For _sys_prx_register_module
+void ppu_manual_load_imports_exports(u32 imports_start, u32 imports_size, u32 exports_start, u32 exports_size)
+{
+	auto& _main = g_fxo->get<ppu_module>();
+	auto& link = g_fxo->get<ppu_linkage_info>();
+
+	ppu_load_exports(&link, exports_start, exports_start + exports_size);
+	ppu_load_imports(_main.relocs, &link, imports_start, imports_start + imports_size);
 }
 
 static void ppu_check_patch_spu_images(const ppu_segment& seg)
@@ -807,13 +873,12 @@ void try_spawn_ppu_if_exclusive_program(const ppu_module& m)
 	{
 		ppu_thread_params p
 		{
-		    .stack_addr = vm::cast(vm::alloc(0x100000, vm::stack, 4096)),
-		    .stack_size = 0x100000,
+			.stack_addr = vm::cast(vm::alloc(SYS_PROCESS_PARAM_STACK_SIZE_MAX, vm::stack, 4096)),
+			.stack_size = SYS_PROCESS_PARAM_STACK_SIZE_MAX,
 		};
 
-		auto ppu = idm::make_ptr<named_thread<ppu_thread>>("PPU[0x1000000] Thread (test_thread)", p, "test_thread", 0);
+		auto ppu = idm::make_ptr<named_thread<ppu_thread>>(p, "test_thread", 0);
 
-		ppu->cmd_push({ppu_cmd::initialize, 0});
 		ppu->cia = m.funcs[0].addr;
 
 		// For kernel explorer
@@ -821,7 +886,7 @@ void try_spawn_ppu_if_exclusive_program(const ppu_module& m)
 	}
 }
 
-std::shared_ptr<lv2_prx> ppu_load_prx(const ppu_prx_object& elf, const std::string& path)
+std::shared_ptr<lv2_prx> ppu_load_prx(const ppu_prx_object& elf, const std::string& path, s64 file_offset)
 {
 	if (elf != elf_error::ok)
 	{
@@ -1054,6 +1119,7 @@ std::shared_ptr<lv2_prx> ppu_load_prx(const ppu_prx_object& elf, const std::stri
 
 			break;
 		}
+		default : break;
 		}
 	}
 
@@ -1099,6 +1165,7 @@ std::shared_ptr<lv2_prx> ppu_load_prx(const ppu_prx_object& elf, const std::stri
 	prx->epilogue.set(prx->specials[0x330f7005]);
 	prx->name = path.substr(path.find_last_of('/') + 1);
 	prx->path = path;
+	prx->offset = file_offset;
 
 	sha1_finish(&sha, prx->sha1);
 
@@ -1167,7 +1234,7 @@ void ppu_unload_prx(const lv2_prx& prx)
 	//	auto pinfo = static_cast<ppu_linkage_info::module_data::info*>(exp.second);
 	//	if (pinfo->static_func)
 	//	{
-	//		pinfo->export_addr = ppu_function_manager::func_addr(pinfo->static_func->index);
+	//		pinfo->export_addr = g_fxo->get<ppu_function_manager>().func_addr(pinfo->static_func->index);
 	//	}
 	//	else if (pinfo->static_var)
 	//	{
@@ -1201,7 +1268,7 @@ bool ppu_load_exec(const ppu_exec_object& elf)
 
 			const addr_range r = addr_range::start_length(static_cast<u32>(prog.p_vaddr), static_cast<u32>(prog.p_memsz));
 
-			if ((prog.p_vaddr | prog.p_memsz) > UINT32_MAX || !r.valid() || !r.inside(addr_range::start_length(0x00000000, 0x30000000)))
+			if ((prog.p_vaddr | prog.p_memsz) > u32{umax} || !r.valid() || !r.inside(addr_range::start_length(0x00000000, 0x30000000)))
 			{
 				return false;
 			}
@@ -1209,6 +1276,7 @@ bool ppu_load_exec(const ppu_exec_object& elf)
 	}
 
 	g_fxo->need<ppu_linkage_info>();
+	g_fxo->need<ppu_function_manager>();
 
 	// Set for delayed initialization in ppu_initialize()
 	auto& _main = g_fxo->get<ppu_module>();
@@ -1222,10 +1290,10 @@ bool ppu_load_exec(const ppu_exec_object& elf)
 	u32 tls_vsize = 0;
 
 	// Process information
-	u32 sdk_version = 0xffffffff;
+	u32 sdk_version = SYS_PROCESS_PARAM_SDK_VERSION_UNKNOWN;
 	s32 primary_prio = 1001;
-	u32 primary_stacksize = 0x100000;
-	u32 malloc_pagesize = 0x100000;
+	u32 primary_stacksize = SYS_PROCESS_PARAM_STACK_SIZE_MAX;
+	u32 malloc_pagesize = SYS_PROCESS_PARAM_MALLOC_PAGE_SIZE_1M;
 	u32 ppc_seg = 0;
 
 	// Limit for analysis
@@ -1420,7 +1488,7 @@ bool ppu_load_exec(const ppu_exec_object& elf)
 		{
 			ppu_loader.notice("TLS info segment found: tls-image=*0x%x, image-size=0x%x, tls-size=0x%x", prog.p_vaddr, prog.p_filesz, prog.p_memsz);
 
-			if ((prog.p_vaddr | prog.p_filesz | prog.p_memsz) > UINT32_MAX)
+			if ((prog.p_vaddr | prog.p_filesz | prog.p_memsz) > u32{umax})
 			{
 				ppu_loader.fatal("ppu_load_exec(): TLS segment is invalid!");
 				return false;
@@ -1456,7 +1524,7 @@ bool ppu_load_exec(const ppu_exec_object& elf)
 					ppu_loader.warning("Bad process_param size! [0x%x : 0x%x]", info.size, sizeof(process_param_t));
 				}
 
-				if (info.magic != 0x13bcc5f6u)
+				if (info.magic != SYS_PROCESS_PARAM_MAGIC)
 				{
 					ppu_loader.error("Bad process_param magic! [0x%x]", info.magic);
 				}
@@ -1547,6 +1615,12 @@ bool ppu_load_exec(const ppu_exec_object& elf)
 		load_libs.emplace("libsysmodule.sprx");
 	}
 
+	if (g_ps3_process_info.get_cellos_appname() == "vsh.self"sv)
+	{
+		// Cannot be used with vsh.self (it self-manages itself)
+		load_libs.clear();
+	}
+
 	const std::string lle_dir = vfs::get("/dev_flash/sys/external/");
 
 	if (!fs::is_file(lle_dir + "liblv2.sprx"))
@@ -1569,7 +1643,7 @@ bool ppu_load_exec(const ppu_exec_object& elf)
 			{
 				ppu_loader.warning("Loading library: %s", name);
 
-				auto prx = ppu_load_prx(obj, lle_dir + name);
+				auto prx = ppu_load_prx(obj, lle_dir + name, 0);
 
 				if (prx->funcs.empty())
 				{
@@ -1658,16 +1732,17 @@ bool ppu_load_exec(const ppu_exec_object& elf)
 	// Fix primary stack size
 	switch (u32 sz = primary_stacksize)
 	{
-	case 0x10: primary_stacksize = 32 * 1024; break; // SYS_PROCESS_PRIMARY_STACK_SIZE_32K
-	case 0x20: primary_stacksize = 64 * 1024; break; // SYS_PROCESS_PRIMARY_STACK_SIZE_64K
-	case 0x30: primary_stacksize = 96 * 1024; break; // SYS_PROCESS_PRIMARY_STACK_SIZE_96K
-	case 0x40: primary_stacksize = 128 * 1024; break; // SYS_PROCESS_PRIMARY_STACK_SIZE_128K
-	case 0x50: primary_stacksize = 256 * 1024; break; // SYS_PROCESS_PRIMARY_STACK_SIZE_256K
-	case 0x60: primary_stacksize = 512 * 1024; break; // SYS_PROCESS_PRIMARY_STACK_SIZE_512K
-	case 0x70: primary_stacksize = 1024 * 1024; break; // SYS_PROCESS_PRIMARY_STACK_SIZE_1M
+	case SYS_PROCESS_PRIMARY_STACK_SIZE_32K:  primary_stacksize =   32 * 1024; break;
+	case SYS_PROCESS_PRIMARY_STACK_SIZE_64K:  primary_stacksize =   64 * 1024; break;
+	case SYS_PROCESS_PRIMARY_STACK_SIZE_96K:  primary_stacksize =   96 * 1024; break;
+	case SYS_PROCESS_PRIMARY_STACK_SIZE_128K: primary_stacksize =  128 * 1024; break;
+	case SYS_PROCESS_PRIMARY_STACK_SIZE_256K: primary_stacksize =  256 * 1024; break;
+	case SYS_PROCESS_PRIMARY_STACK_SIZE_512K: primary_stacksize =  512 * 1024; break;
+	case SYS_PROCESS_PRIMARY_STACK_SIZE_1M:   primary_stacksize = 1024 * 1024; break;
 	default:
 	{
-		primary_stacksize = utils::align<u32>(std::clamp<u32>(sz, 0x10000, 0x100000), 4096);
+		// According to elad335, the min value seems to be 64KB instead of the expected 4KB (SYS_PROCESS_PARAM_STACK_SIZE_MIN)
+		primary_stacksize = utils::align<u32>(std::clamp<u32>(sz, 0x10000, SYS_PROCESS_PARAM_STACK_SIZE_MAX), 4096);
 		break;
 	}
 	}
@@ -1677,7 +1752,7 @@ bool ppu_load_exec(const ppu_exec_object& elf)
 	p.stack_addr = vm::cast(vm::alloc(primary_stacksize, vm::stack, 4096));
 	p.stack_size = primary_stacksize;
 
-	auto ppu = idm::make_ptr<named_thread<ppu_thread>>("PPU[0x1000000] main_thread ", p, "main_thread", primary_prio, 1);
+	auto ppu = idm::make_ptr<named_thread<ppu_thread>>(p, "main_thread", primary_prio, 1);
 
 	// Write initial data (exitspawn)
 	if (!Emu.data.empty())
@@ -1687,9 +1762,13 @@ bool ppu_load_exec(const ppu_exec_object& elf)
 	}
 
 	// Initialize memory stats (according to sdk version)
-	// TODO: This is probably wrong with vsh.self
 	u32 mem_size;
-	if (sdk_version > 0x0021FFFF)
+	if (g_ps3_process_info.get_cellos_appname() == "vsh.self"sv)
+	{
+		// Because vsh.self comes before any generic application, more memory is available to it
+		mem_size = 0xF000000;
+	}
+	else if (sdk_version > 0x0021FFFF)
 	{
 		mem_size = 0xD500000;
 	}
@@ -1724,7 +1803,7 @@ bool ppu_load_exec(const ppu_exec_object& elf)
 
 	ppu->cmd_push({ppu_cmd::initialize, 0});
 
-	if (!entry)
+	if (!entry && g_ps3_process_info.get_cellos_appname() != "vsh.self"sv)
 	{
 		// Set TLS args, call sys_initialize_tls
 		ppu->cmd_list
@@ -1732,7 +1811,10 @@ bool ppu_load_exec(const ppu_exec_object& elf)
 			{ ppu_cmd::set_args, 4 }, u64{ppu->id}, u64{tls_vaddr}, u64{tls_fsize}, u64{tls_vsize},
 			{ ppu_cmd::hle_call, FIND_FUNC(sys_initialize_tls) },
 		});
+	}
 
+	if (!entry)
+	{
 		entry = static_cast<u32>(elf.header.e_entry); // Run entry from elf
 	}
 
@@ -1778,7 +1860,7 @@ bool ppu_load_exec(const ppu_exec_object& elf)
 	return true;
 }
 
-std::pair<std::shared_ptr<lv2_overlay>, CellError> ppu_load_overlay(const ppu_exec_object& elf, const std::string& path)
+std::pair<std::shared_ptr<lv2_overlay>, CellError> ppu_load_overlay(const ppu_exec_object& elf, const std::string& path, s64 file_offset)
 {
 	if (elf != elf_error::ok)
 	{
@@ -1814,6 +1896,7 @@ std::pair<std::shared_ptr<lv2_overlay>, CellError> ppu_load_overlay(const ppu_ex
 	// Set path (TODO)
 	ovlm->name = path.substr(path.find_last_of('/') + 1);
 	ovlm->path = path;
+	ovlm->offset = file_offset;
 
 	u32 end = 0;
 

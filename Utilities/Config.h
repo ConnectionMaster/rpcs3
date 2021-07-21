@@ -1,7 +1,7 @@
 #pragma once
 
 #include "util/types.hpp"
-#include "Utilities/StrFmt.h"
+#include "Utilities/StrUtil.h"
 #include "util/logs.hpp"
 #include "util/atomic.hpp"
 #include "util/shared_ptr.hpp"
@@ -17,14 +17,8 @@ namespace cfg
 	// Format min and max values
 	std::vector<std::string> make_int_range(s64 min, s64 max);
 
-	// Convert string to signed integer
-	bool try_to_int64(s64* out, const std::string& value, s64 min, s64 max);
-
 	// Format min and max unsigned values
 	std::vector<std::string> make_uint_range(u64 min, u64 max);
-
-	// Convert string to unsigned integer
-	bool try_to_uint64(u64* out, const std::string& value, u64 min, u64 max);
 
 	// Internal hack
 	bool try_to_enum_value(u64* out, decltype(&fmt_class_string<int>::format) func, const std::string&);
@@ -48,11 +42,11 @@ namespace cfg
 	// Config tree entry abstract base class
 	class _base
 	{
-		const type m_type;
+		const type m_type{};
 
 	protected:
 		bool m_dynamic = true;
-		const std::string m_name;
+		const std::string m_name{};
 
 		// Ownerless entry constructor
 		_base(type _type);
@@ -65,13 +59,15 @@ namespace cfg
 
 		_base& operator=(const _base&) = delete;
 
+		virtual ~_base() = default;
+
 		// Get type
 		type get_type() const { return m_type; }
 
-		const std::string& get_name() const { return m_name; };
+		const std::string& get_name() const { return m_name; }
 
 		// Get dynamic property for reloading configs during games
-		bool get_is_dynamic() const { return m_dynamic; };
+		bool get_is_dynamic() const { return m_dynamic; }
 
 		// Reset defaults
 		virtual void from_default() = 0;
@@ -98,7 +94,7 @@ namespace cfg
 	// Config tree node which contains another nodes
 	class node : public _base
 	{
-		std::vector<_base*> m_nodes;
+		std::vector<_base*> m_nodes{};
 
 		friend class _base;
 
@@ -250,7 +246,7 @@ namespace cfg
 		static_assert(Min < Max, "Invalid cfg::_int range");
 
 		// Prefer 32 bit type if possible
-		using int_type = std::conditional_t<Min >= INT32_MIN && Max <= INT32_MAX, s32, s64>;
+		using int_type = std::conditional_t<Min >= s32{smin} && Max <= s32{smax}, s32, s64>;
 
 		atomic_t<int_type> m_value;
 
@@ -312,10 +308,10 @@ namespace cfg
 	};
 
 	// Alias for 32 bit int
-	using int32 = _int<INT32_MIN, INT32_MAX>;
+	using int32 = _int<s32{smin}, s32{smax}>;
 
 	// Alias for 64 bit int
-	using int64 = _int<INT64_MIN, INT64_MAX>;
+	using int64 = _int<s64{smin}, s64{smax}>;
 
 	// Unsigned 32/64-bit integer entry with custom Min/Max range.
 	template <u64 Min, u64 Max>
@@ -324,7 +320,7 @@ namespace cfg
 		static_assert(Min < Max, "Invalid cfg::uint range");
 
 		// Prefer 32 bit type if possible
-		using int_type = std::conditional_t<Max <= UINT32_MAX, u32, u64>;
+		using int_type = std::conditional_t<Max <= u32{umax}, u32, u64>;
 
 		atomic_t<int_type> m_value;
 
@@ -386,10 +382,10 @@ namespace cfg
 	};
 
 	// Alias for 32 bit uint
-	using uint32 = uint<0, UINT32_MAX>;
+	using uint32 = uint<0, u32{umax}>;
 
 	// Alias for 64 bit int
-	using uint64 = uint<0, UINT64_MAX>;
+	using uint64 = uint<0, u64{umax}>;
 
 	// Simple string entry with mutex
 	class string : public _base
@@ -443,7 +439,7 @@ namespace cfg
 	// Simple set entry (TODO: template for various types)
 	class set_entry final : public _base
 	{
-		std::set<std::string> m_set;
+		std::set<std::string> m_set{};
 
 	public:
 		// Default value is empty list in current implementation
@@ -479,7 +475,7 @@ namespace cfg
 
 	class log_entry final : public _base
 	{
-		std::map<std::string, logs::level> m_map;
+		std::map<std::string, logs::level> m_map{};
 
 	public:
 		log_entry(node* owner, const std::string& name)

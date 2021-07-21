@@ -14,7 +14,7 @@ struct cfg_root : cfg::node
 	{
 	private:
 		/** We don't wanna include the sysinfo header here */
-		bool has_rtm() const;
+		static bool has_rtm();
 
 	public:
 		node_core(cfg::node* _this) : cfg::node(_this, "Core") {}
@@ -22,10 +22,12 @@ struct cfg_root : cfg::node
 		cfg::_enum<ppu_decoder_type> ppu_decoder{ this, "PPU Decoder", ppu_decoder_type::llvm };
 		cfg::_int<1, 8> ppu_threads{ this, "PPU Threads", 2 }; // Amount of PPU threads running simultaneously (must be 2)
 		cfg::_bool ppu_debug{ this, "PPU Debug" };
+		cfg::_bool ppu_call_history{ this, "PPU Calling History" }; // Enable PPU calling history recording
 		cfg::_bool llvm_logs{ this, "Save LLVM logs" };
 		cfg::string llvm_cpu{ this, "Use LLVM CPU" };
-		cfg::_int<0, INT32_MAX> llvm_threads{ this, "Max LLVM Compile Threads", 0 };
+		cfg::_int<0, 1024> llvm_threads{ this, "Max LLVM Compile Threads", 0 };
 		cfg::_bool ppu_llvm_greedy_mode{ this, "PPU LLVM Greedy Mode", false, false };
+		cfg::_bool ppu_llvm_precompilation{ this, "PPU LLVM Precompilation", true };
 		cfg::_enum<thread_scheduler_mode> thread_scheduler{this, "Thread Scheduler Mode", thread_scheduler_mode::os};
 		cfg::_bool set_daz_and_ftz{ this, "Set DAZ and FTZ", false };
 		cfg::_enum<spu_decoder_type> spu_decoder{ this, "SPU Decoder", spu_decoder_type::llvm };
@@ -53,6 +55,7 @@ struct cfg_root : cfg::node
 		cfg::_int<-1, 14> ppu_128_reservations_loop_max_length{ this, "Accurate PPU 128-byte Reservation Op Max Length", 0, true }; // -1: Always accurate, 0: Never accurate, 1-14: max accurate loop length
 		cfg::_bool llvm_ppu_accurate_vector_nan{ this, "PPU LLVM Accurate Vector NaN values", false };
 		cfg::_int<-64, 64> stub_ppu_traps{ this, "Stub PPU Traps", 0, true }; // Hack, skip PPU traps for rare cases where the trap is continueable (specify relative instructions to skip)
+		cfg::_bool full_width_avx512{ this, "Full Width AVX-512", false};
 
 		cfg::_bool debug_console_mode{ this, "Debug Console Mode", false }; // Debug console emulation, not recommended
 		cfg::_bool hook_functions{ this, "Hook static functions" };
@@ -63,7 +66,7 @@ struct cfg_root : cfg::node
 		cfg::uint64 tx_limit1_ns{this, "TSX Transaction First Limit", 800}; // In nanoseconds
 		cfg::uint64 tx_limit2_ns{this, "TSX Transaction Second Limit", 2000}; // In nanoseconds
 
-		cfg::_int<10, 3000> clocks_scale{ this, "Clocks scale", 100, true }; // Changing this from 100 (percentage) may affect game speed in unexpected ways
+		cfg::_int<10, 3000> clocks_scale{ this, "Clocks scale", 100 }; // Changing this from 100 (percentage) may affect game speed in unexpected ways
 		cfg::_enum<sleep_timers_accuracy_level> sleep_timers_accuracy{ this, "Sleep Timers Accuracy",
 #ifdef __linux__
 			sleep_timers_accuracy_level::_as_host, true };
@@ -79,19 +82,31 @@ struct cfg_root : cfg::node
 	{
 		node_vfs(cfg::node* _this) : cfg::node(_this, "VFS") {}
 
-		std::string get(const cfg::string&, const char*) const;
+		std::string get(const cfg::string&, std::string_view emu_dir = {}) const;
 
 		cfg::string emulator_dir{ this, "$(EmulatorDir)" }; // Default (empty): taken from fs::get_config_dir()
 		cfg::string dev_hdd0{ this, "/dev_hdd0/", "$(EmulatorDir)dev_hdd0/" };
 		cfg::string dev_hdd1{ this, "/dev_hdd1/", "$(EmulatorDir)dev_hdd1/" };
 		cfg::string dev_flash{ this, "/dev_flash/", "$(EmulatorDir)dev_flash/" };
+		cfg::string dev_flash2{ this, "/dev_flash2/", "$(EmulatorDir)dev_flash2/" };
+		cfg::string dev_flash3{ this, "/dev_flash3/", "$(EmulatorDir)dev_flash3/" };
 		cfg::string dev_usb000{ this, "/dev_usb000/", "$(EmulatorDir)dev_usb000/" };
 		cfg::string dev_bdvd{ this, "/dev_bdvd/" }; // Not mounted
 		cfg::string app_home{ this, "/app_home/" }; // Not mounted
 
 		std::string get_dev_flash() const
 		{
-			return get(dev_flash, "dev_flash/");
+			return get(dev_flash);
+		}
+
+		std::string get_dev_flash2() const
+		{
+			return get(dev_flash2);
+		}
+
+		std::string get_dev_flash3() const
+		{
+			return get(dev_flash3);
 		}
 
 		cfg::_bool host_root{ this, "Enable /host_root/" };
@@ -122,7 +137,7 @@ struct cfg_root : cfg::node
 		cfg::_bool vsync{ this, "VSync" };
 		cfg::_bool debug_output{ this, "Debug output" };
 		cfg::_bool overlay{ this, "Debug overlay", false, true };
-		cfg::_bool gl_legacy_buffers{ this, "Use Legacy OpenGL Buffers" };
+		cfg::_bool renderdoc_compatiblity{ this, "Renderdoc Compatibility Mode" };
 		cfg::_bool use_gpu_texture_scaling{ this, "Use GPU texture scaling", false };
 		cfg::_bool stretch_to_display_area{ this, "Stretch To Display Area", false, true };
 		cfg::_bool force_high_precision_z_buffer{ this, "Force High Precision Z buffer" };
@@ -176,7 +191,9 @@ struct cfg_root : cfg::node
 			cfg::uint<2, 6000> framerate_datapoint_count{ this, "Framerate datapoints", 50, true };
 			cfg::uint<2, 6000> frametime_datapoint_count{ this, "Frametime datapoints", 170, true };
 			cfg::_enum<detail_level> level{ this, "Detail level", detail_level::medium, true };
-			cfg::uint<1, 5000> update_interval{ this, "Metrics update interval (ms)", 350, true };
+			cfg::_enum<perf_graph_detail_level> framerate_graph_detail_level{ this, "Framerate graph detail level", perf_graph_detail_level::show_all, true };
+			cfg::_enum<perf_graph_detail_level> frametime_graph_detail_level{ this, "Frametime graph detail level", perf_graph_detail_level::show_all, true };
+			cfg::uint<1, 1000> update_interval{ this, "Metrics update interval (ms)", 350, true };
 			cfg::uint<4, 36> font_size{ this, "Font size (px)", 10, true };
 			cfg::_enum<screen_quadrant> position{ this, "Position", screen_quadrant::top_left, true };
 			cfg::string font{ this, "Font", "n023055ms.ttf", true };
@@ -206,8 +223,8 @@ struct cfg_root : cfg::node
 			node_shader_preloading_dialog(cfg::node* _this) : cfg::node(_this, "Shader Loading Dialog") {}
 
 			cfg::_bool use_custom_background{ this, "Allow custom background", true, true };
-			cfg::_int<0, 100> darkening_strength{ this, "Darkening effect strength", 30, true };
-			cfg::_int<0, 100> blur_strength{ this, "Blur effect strength", 0, true };
+			cfg::uint<0, 100> darkening_strength{ this, "Darkening effect strength", 30, true };
+			cfg::uint<0, 100> blur_strength{ this, "Blur effect strength", 0, true };
 
 		} shader_preloading_dialog{ this };
 
@@ -295,7 +312,7 @@ struct cfg_root : cfg::node
 
 	cfg::log_entry log{ this, "Log" };
 
-	std::string name;
+	std::string name{};
 };
 
 extern cfg_root g_cfg;

@@ -127,6 +127,8 @@ struct vdec_context final
 
 	lf_queue<std::variant<vdec_start_seq_t, vdec_close_t, vdec_cmd, CellVdecFrameRate>> in_cmd;
 
+	AVRational log_time_base{}; // Used to reduce log spam
+
 	vdec_context(s32 type, u32 /*profile*/, u32 addr, u32 size, vm::ptr<CellVdecCbMsg> func, u32 arg)
 		: type(type)
 		, mem_addr(addr)
@@ -237,6 +239,8 @@ struct vdec_context final
 			{
 				avcodec_flush_buffers(ctx);
 
+				log_time_base = {};
+
 				frc_set = 0; // TODO: ???
 				next_pts = 0;
 				next_dts = 0;
@@ -260,8 +264,8 @@ struct vdec_context final
 
 					packet.data = vm::_ptr<u8>(au_addr);
 					packet.size = au_size;
-					packet.pts = au_pts != umax ? au_pts : INT64_MIN;
-					packet.dts = au_dts != umax ? au_dts : INT64_MIN;
+					packet.pts = au_pts != umax ? au_pts : s64{smin};
+					packet.dts = au_dts != umax ? au_dts : s64{smin};
 
 					if (next_pts == 0 && au_pts != umax)
 					{
@@ -281,8 +285,8 @@ struct vdec_context final
 				}
 				else
 				{
-					packet.pts = INT64_MIN;
-					packet.dts = INT64_MIN;
+					packet.pts = smin;
+					packet.dts = smin;
 					cellVdec.trace("End sequence...");
 				}
 
@@ -336,12 +340,12 @@ struct vdec_context final
 							fmt::throw_exception("Repeated frames not supported (0x%x)", frame->repeat_pict);
 						}
 
-						if (frame->pts != INT64_MIN)
+						if (frame->pts != smin)
 						{
 							next_pts = frame->pts;
 						}
 
-						if (frame->pkt_dts != INT64_MIN)
+						if (frame->pkt_dts != smin)
 						{
 							next_dts = frame->pkt_dts;
 						}
@@ -376,6 +380,12 @@ struct vdec_context final
 						}
 						else if (ctx->time_base.num == 0)
 						{
+							if (log_time_base.den != ctx->time_base.den || log_time_base.num != ctx->time_base.num)
+							{
+								cellVdec.error("time_base.num is 0 (%d/%d, tpf=%d framerate=%d/%d)", ctx->time_base.num, ctx->time_base.den, ctx->ticks_per_frame, ctx->framerate.num, ctx->framerate.den);
+								log_time_base = ctx->time_base;
+							}
+
 							// Hack
 							const u64 amend = u64{90000} / 30;
 							frame.frc = CELL_VDEC_FRC_30;
@@ -405,8 +415,14 @@ struct vdec_context final
 								frame.frc = CELL_VDEC_FRC_60;
 							else
 							{
+								if (log_time_base.den != ctx->time_base.den || log_time_base.num != ctx->time_base.num)
+								{
+									// 1/1000 usually means that the time stamps are written in 1ms units and that the frame rate may vary.
+									cellVdec.error("Unsupported time_base (%d/%d, tpf=%d framerate=%d/%d)", ctx->time_base.num, ctx->time_base.den, ctx->ticks_per_frame, ctx->framerate.num, ctx->framerate.den);
+									log_time_base = ctx->time_base;
+								}
+
 								// Hack
-								cellVdec.error("Unsupported time_base.num (%d/%d, tpf=%d)", ctx->time_base.den, ctx->time_base.num, ctx->ticks_per_frame);
 								amend = u64{90000} / 30;
 								frame.frc = CELL_VDEC_FRC_30;
 							}
@@ -883,7 +899,7 @@ error_code cellVdecGetPicture(u32 handle, vm::cptr<CellVdecPicFormat> format, vm
 		}
 		}
 
-		vdec->sws = sws_getCachedContext(vdec->sws, w, h, in_f, w, h, out_f, SWS_POINT, NULL, NULL, NULL);
+		vdec->sws = sws_getCachedContext(vdec->sws, w, h, in_f, w, h, out_f, SWS_POINT, nullptr, nullptr, nullptr);
 
 		u8* in_data[4] = { frame->data[0], frame->data[1], frame->data[2], alpha_plane.get() };
 		int in_line[4] = { frame->linesize[0], frame->linesize[1], frame->linesize[2], w * 1 };

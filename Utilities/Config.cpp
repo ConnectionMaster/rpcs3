@@ -35,12 +35,14 @@ namespace cfg
 
 	bool _base::from_string(const std::string&, bool)
 	{
-		fmt::throw_exception("from_string() purecall");
+		cfg_log.fatal("cfg::_base::from_string() purecall");
+		return false;
 	}
 
 	bool _base::from_list(std::vector<std::string>&&)
 	{
-		fmt::throw_exception("from_list() purecall");
+		cfg_log.fatal("cfg::_base::from_list() purecall");
+		return false;
 	}
 
 	// Emit YAML
@@ -56,7 +58,7 @@ std::vector<std::string> cfg::make_int_range(s64 min, s64 max)
 	return {std::to_string(min), std::to_string(max)};
 }
 
-bool cfg::try_to_int64(s64* out, const std::string& value, s64 min, s64 max)
+bool try_to_int64(s64* out, const std::string& value, s64 min, s64 max)
 {
 	s64 result;
 	const char* start = &value.front();
@@ -102,7 +104,7 @@ std::vector<std::string> cfg::make_uint_range(u64 min, u64 max)
 	return {std::to_string(min), std::to_string(max)};
 }
 
-bool cfg::try_to_uint64(u64* out, const std::string& value, u64 min, u64 max)
+bool try_to_uint64(u64* out, const std::string& value, u64 min, u64 max)
 {
 	u64 result;
 	const char* start = &value.front();
@@ -136,7 +138,7 @@ bool cfg::try_to_uint64(u64* out, const std::string& value, u64 min, u64 max)
 
 bool cfg::try_to_enum_value(u64* out, decltype(&fmt_class_string<int>::format) func, const std::string& value)
 {
-	u64 max = -1;
+	u64 max = umax;
 
 	for (u64 i = 0;; i++)
 	{

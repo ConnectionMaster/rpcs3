@@ -17,8 +17,6 @@
 #include <deque>
 #include <mutex>
 
-#include "util/sysinfo.hpp"
-
 extern fs::file g_tty;
 extern atomic_t<s64> g_tty_size;
 extern std::array<std::deque<std::string>, 16> g_tty_input;
@@ -28,7 +26,7 @@ constexpr auto qstr = QString::fromStdString;
 
 struct gui_listener : logs::listener
 {
-	atomic_t<logs::level> enabled{logs::level{UINT_MAX}};
+	atomic_t<logs::level> enabled{logs::level{0xff}};
 
 	struct packet_t
 	{
@@ -55,12 +53,12 @@ struct gui_listener : logs::listener
 
 	void log(u64 stamp, const logs::message& msg, const std::string& prefix, const std::string& text) override
 	{
-		Q_UNUSED(stamp);
+		Q_UNUSED(stamp)
 
-		if (msg.sev <= enabled)
+		if (msg <= enabled)
 		{
 			packet_t p,* _new = &p;
-			_new->sev = msg.sev;
+			_new->sev = msg;
 
 			if (show_prefix && !prefix.empty())
 			{
@@ -69,12 +67,12 @@ struct gui_listener : logs::listener
 				_new->msg += "} ";
 			}
 
-			if (msg.ch && '\0' != *msg.ch->name)
+			if (msg->name && '\0' != *msg->name)
 			{
-				_new->msg += msg.ch->name;
-				_new->msg += msg.sev == logs::level::todo ? " TODO: " : ": ";
+				_new->msg += msg->name;
+				_new->msg += msg == logs::level::todo ? " TODO: " : ": ";
 			}
-			else if (msg.sev == logs::level::todo)
+			else if (msg == logs::level::todo)
 			{
 				_new->msg += "TODO: ";
 			}
@@ -164,7 +162,7 @@ log_frame::log_frame(std::shared_ptr<gui_settings> guiSettings, QWidget *parent)
 	timer->start(10);
 }
 
-void log_frame::SetLogLevel(logs::level lev)
+void log_frame::SetLogLevel(logs::level lev) const
 {
 	switch (lev)
 	{
@@ -204,12 +202,10 @@ void log_frame::SetLogLevel(logs::level lev)
 		m_trace_act->trigger();
 		break;
 	}
-	default:
-		m_warning_act->trigger();
 	}
 }
 
-void log_frame::SetTTYLogging(bool val)
+void log_frame::SetTTYLogging(bool val) const
 {
 	m_tty_act->setChecked(val);
 }
@@ -450,6 +446,7 @@ void log_frame::RepaintTextColors()
 	QTextCursor tty_cursor = m_tty->textCursor();
 	QTextCharFormat text_format = tty_cursor.charFormat();
 	text_format.setForeground(gui::utils::get_label_color("tty_text"));
+	tty_cursor.setCharFormat(text_format);
 	m_tty->setTextCursor(tty_cursor);
 
 	// Repaint log with new colors
@@ -601,7 +598,6 @@ void log_frame::UpdateUI()
 			case logs::level::warning: text = QStringLiteral("W "); break;
 			case logs::level::notice: text = QStringLiteral("! "); break;
 			case logs::level::trace: text = QStringLiteral("T "); break;
-			default: continue;
 			}
 
 			// Print UTF-8 text.

@@ -255,23 +255,27 @@ namespace rsx
 		template<u32 id, u32 index, int count, int register_count, typename type>
 		void set_vertex_data_impl(thread* rsx, u32 arg)
 		{
-			static const usz increment_per_array_index = (register_count * sizeof(type)) / sizeof(u32);
+			static constexpr usz increment_per_array_index = (register_count * sizeof(type)) / sizeof(u32);
 
-			static const usz attribute_index = index / increment_per_array_index;
-			static const usz vertex_subreg = index % increment_per_array_index;
+			static constexpr usz attribute_index = index / increment_per_array_index;
+			static constexpr usz vertex_subreg = index % increment_per_array_index;
 
-			const auto vtype = vertex_data_type_from_element_type<type>::type;
-			ensure(vtype != rsx::vertex_base_type::cmp);
+			constexpr auto vtype = vertex_data_type_from_element_type<type>::type;
+			static_assert(vtype != rsx::vertex_base_type::cmp);
+			static_assert(vtype != rsx::vertex_base_type::ub256);
 
-			switch (vtype)
+			// Convert LE data to BE layout
+			if constexpr (sizeof(type) == 4)
 			{
-			case rsx::vertex_base_type::ub:
-			case rsx::vertex_base_type::ub256:
-				// Get BE data
 				arg = std::bit_cast<u32, be_t<u32>>(arg);
-				break;
-			default:
-				break;
+			}
+			else if constexpr (sizeof(type) == 2)
+			{
+				// 2 16-bit values packed in 1 32-bit word
+				const auto be_data = std::bit_cast<u32, be_t<u32>>(arg);
+
+				// After u32 swap, the components are in the wrong position
+				arg = (be_data << 16) | (be_data >> 16);
 			}
 
 			if (rsx->in_begin_end)
@@ -398,6 +402,7 @@ namespace rsx
 
 		void draw_inline_array(thread* /*rsx*/, u32 /*reg*/, u32 arg)
 		{
+			arg = std::bit_cast<u32, be_t<u32>>(arg);
 			rsx::method_registers.current_draw_clause.command = rsx::draw_command::inlined_array;
 			rsx::method_registers.current_draw_clause.inline_vertex_array.push_back(arg);
 		}
@@ -462,13 +467,10 @@ namespace rsx
 				u32 rcount = count;
 
 				if (const u32 max = load_pos * 4 + rcount + (index % 4);
-					max > 512 * 4)
+					max > max_vertex_program_instructions * 4)
 				{
-					// PS3 seems to allow exceeding the program buffer by upto 32 instructions before crashing
-					// Discard the "excess" instructions to not overflow our transform program buffer
-					// TODO: Check if the instructions in the overflow area are executed by PS3
-					rsx_log.warning("Program buffer overflow!");
-					rcount -= max - (512 * 4);
+					rsx_log.warning("Program buffer overflow! Attempted to write %u VP instructions.", max / 4);
+					rcount -= max - (max_vertex_program_instructions * 4);
 				}
 
 				stream_data_to_memory_swapped_u32<true>(&rsx::method_registers.transform_program[load_pos * 4 + index % 4]
@@ -776,6 +778,24 @@ namespace rsx
 				method_registers.current_draw_clause.insert_command_barrier(index_base_modifier_barrier, arg);
 			}
 		}
+
+		template<u32 index>
+		struct set_vertex_array_offset
+		{
+			static void impl(thread* rsx, u32 reg, u32 arg)
+			{
+				if (rsx->in_begin_end &&
+					!rsx::method_registers.current_draw_clause.empty() &&
+					reg != method_registers.register_previous_value)
+				{
+					// Revert change to queue later
+					method_registers.decode(reg, method_registers.register_previous_value);
+
+					// Insert offset mofifier barrier
+					method_registers.current_draw_clause.insert_command_barrier(vertex_array_offset_modifier_barrier, arg, index);
+				}
+			}
+		};
 
 		void check_index_array_dma(thread* rsx, u32 reg, u32 arg)
 		{
@@ -1142,6 +1162,16 @@ namespace rsx
 
 			const u32 src_address = get_address(src_offset, src_dma);
 			const u32 dst_address = get_address(dst_offset, dst_dma);
+
+			if (src_address == dst_address &&
+				in_w == clip_w && in_h == clip_h &&
+				in_pitch == out_pitch &&
+				rsx::fcmp(scale_x, 1.f) && rsx::fcmp(scale_y, 1.f))
+			{
+				// NULL operation
+				rsx_log.warning("NV3089_IMAGE_IN: Operation writes memory onto itself with no modification (move-to-self). Will ignore.");
+				return;
+			}
 
 			const u32 src_line_length = (in_w * in_bpp);
 
@@ -2625,6 +2655,56 @@ namespace rsx
 		return registers[reg] == value;
 	}
 
+	void draw_clause::insert_command_barrier(command_barrier_type type, u32 arg, u32 index)
+	{
+		ensure(!draw_command_ranges.empty());
+
+		auto _do_barrier_insert = [this](barrier_t&& val)
+		{
+			if (draw_command_barriers.empty() || draw_command_barriers.back() < val)
+			{
+				draw_command_barriers.push_back(val);
+				return;
+			}
+
+			for (auto it = draw_command_barriers.begin(); it != draw_command_barriers.end(); it++)
+			{
+				if (*it < val)
+				{
+					continue;
+				}
+
+				draw_command_barriers.insert(it, val);
+				break;
+			}
+		};
+
+		if (type == primitive_restart_barrier)
+		{
+			// Rasterization flow barrier
+			const auto& last = draw_command_ranges[current_range_index];
+			const auto address = last.first + last.count;
+
+			_do_barrier_insert({ current_range_index, 0, address, index, arg, 0, type });
+		}
+		else
+		{
+			// Execution dependency barrier. Requires breaking the current draw call sequence and start another.
+			if (draw_command_ranges.back().count > 0)
+			{
+				append_draw_command({});
+			}
+			else
+			{
+				// In case of back-to-back modifiers, do not add duplicates
+				current_range_index = draw_command_ranges.size() - 1;
+			}
+
+			_do_barrier_insert({ current_range_index, get_system_time(), ~0u, index, arg, 0, type });
+			last_execution_barrier_index = current_range_index;
+		}
+	}
+
 	void draw_clause::reset(primitive_type type)
 	{
 		current_range_index = ~0u;
@@ -2663,6 +2743,11 @@ namespace rsx
 				// Change vertex base offset
 				method_registers.decode(NV4097_SET_VERTEX_DATA_BASE_OFFSET, barrier.arg);
 				result |= vertex_base_changed;
+				break;
+			case vertex_array_offset_modifier_barrier:
+				// Change vertex array offset
+				method_registers.decode(NV4097_SET_VERTEX_DATA_ARRAY_OFFSET + barrier.index, barrier.arg);
+				result |= vertex_arrays_changed;
 				break;
 			default:
 				fmt::throw_exception("Unreachable");
@@ -2717,6 +2802,7 @@ namespace rsx
 	}
 
 	// TODO: implement this as virtual function: rsx::thread::init_methods() or something
+	// TODO: this is unused
 	static const bool s_methods_init = []() -> bool
 	{
 		using namespace method_detail;
@@ -3174,6 +3260,7 @@ namespace rsx
 		bind<NV4097_SET_VERTEX_ATTRIB_OUTPUT_MASK, nv4097::set_vertex_attribute_output_mask>();
 		bind<NV4097_SET_VERTEX_DATA_BASE_OFFSET, nv4097::set_vertex_base_offset>();
 		bind<NV4097_SET_VERTEX_DATA_BASE_INDEX, nv4097::set_index_base_offset>();
+		bind_range<NV4097_SET_VERTEX_DATA_ARRAY_OFFSET, 1, 16, nv4097::set_vertex_array_offset>();
 		bind<NV4097_SET_USER_CLIP_PLANE_CONTROL, nv4097::notify_state_changed<vertex_state_dirty>>();
 		bind<NV4097_SET_TRANSFORM_BRANCH_BITS, nv4097::notify_state_changed<vertex_state_dirty>>();
 		bind<NV4097_SET_CLIP_MIN, nv4097::notify_state_changed<invalidate_zclip_bits>>();

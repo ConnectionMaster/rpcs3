@@ -153,6 +153,58 @@ void fmt_class_string<std::vector<char>>::format(std::string& out, u64 arg)
 }
 
 template <>
+void fmt_class_string<std::u8string>::format(std::string& out, u64 arg)
+{
+	const std::u8string& obj = get_object(arg);
+	out.append(obj.cbegin(), obj.cend());
+}
+
+template <>
+void fmt_class_string<std::u8string_view>::format(std::string& out, u64 arg)
+{
+	const std::u8string_view& obj = get_object(arg);
+	out.append(obj.cbegin(), obj.cend());
+}
+
+template <>
+void fmt_class_string<std::vector<char8_t>>::format(std::string& out, u64 arg)
+{
+	const std::vector<char8_t>& obj = get_object(arg);
+	out.append(obj.cbegin(), obj.cend());
+}
+
+void format_byte_array(std::string& out, const uchar* data, usz size)
+{
+	if (!size)
+	{
+		out += "{ EMPTY }";
+		return;
+	}
+
+	out += "{ ";
+
+	for (usz i = 0;; i++)
+	{
+		if (i == size - 1)
+		{
+			fmt::append(out, "%02X", data[i]);
+			break;
+		}
+
+		if (i % 4)
+		{
+			// Place a comma each 4 bytes for ease of byte placement finding
+			fmt::append(out, "%02X ", data[i]);
+			continue;
+		}
+
+		fmt::append(out, "%02X, ", data[i]);
+	}
+
+	out += " }";
+}
+
+template <>
 void fmt_class_string<char>::format(std::string& out, u64 arg)
 {
 	fmt::append(out, "%#hhx", static_cast<char>(arg));
@@ -254,11 +306,24 @@ void fmt_class_string<u128>::format(std::string& out, u64 arg)
 {
 	// TODO: it should be supported as full-fledged integral type (with %u, %d, etc, fmt)
 	const u128& num = get_object(arg);
+
+	if (!num)
+	{
+		out += '0';
+		return;
+	}
+
 #ifdef _MSC_VER
 	fmt::append(out, "0x%016llx%016llx", num.hi, num.lo);
 #else
 	fmt::append(out, "0x%016llx%016llx", static_cast<u64>(num >> 64), static_cast<u64>(num));
 #endif
+}
+
+template <>
+void fmt_class_string<s128>::format(std::string& out, u64 arg)
+{
+	return fmt_class_string<u128>::format(out, arg);
 }
 
 template <>
@@ -300,17 +365,10 @@ void fmt_class_string<src_loc>::format(std::string& out, u64 arg)
 
 namespace fmt
 {
-	[[noreturn]] void raw_verify_error(const src_loc& loc)
+	[[noreturn]] void raw_verify_error(const src_loc& loc, const char8_t* msg)
 	{
-		std::string out{"Verification failed"};
-		fmt::append(out, "%s", loc);
-		thread_ctrl::emergency_exit(out);
-	}
-
-	[[noreturn]] void raw_narrow_error(const src_loc& loc)
-	{
-		std::string out{"Narrowing error"};
-		fmt::append(out, "%s", loc);
+		std::string out;
+		fmt::append(out, "%s%s", msg ? msg : u8"Verification failed", loc);
 		thread_ctrl::emergency_exit(out);
 	}
 
@@ -375,6 +433,8 @@ struct fmt::cfmt_src
 		TYPE(short);
 		if (std::is_signed<char>::value) TYPE(char);
 		TYPE(long);
+		TYPE(u128);
+		TYPE(s128);
 
 #undef TYPE
 
@@ -396,25 +456,28 @@ void fmt::raw_append(std::string& out, const char* fmt, const fmt_type_info* sup
 	cfmt_append(out, fmt, cfmt_src{sup, args});
 }
 
-std::string fmt::replace_first(const std::string& src, const std::string& from, const std::string& to)
+std::string fmt::replace_all(std::string_view src, std::string_view from, std::string_view to, usz count)
 {
-	auto pos = src.find(from);
+	std::string target;
+	target.reserve(src.size() + to.size());
 
-	if (pos == umax)
+	for (usz i = 0, replaced = 0; i < src.size();)
 	{
-		return src;
-	}
+		const usz pos = src.find(from, i);
 
-	return (pos ? src.substr(0, pos) + to : to) + std::string(src.c_str() + pos + from.length());
-}
+		if (pos == umax || replaced++ >= count)
+		{
+			// No match or too many encountered, append the rest of the string as is
+			target.append(src.substr(i));
+			break;
+		}
 
-std::string fmt::replace_all(const std::string& src, const std::string& from, const std::string& to)
-{
-	std::string target = src;
-	for (auto pos = target.find(from); pos != umax; pos = target.find(from, pos + 1))
-	{
-		target = (pos ? target.substr(0, pos) + to : to) + std::string(target.c_str() + pos + from.length());
-		pos += to.length();
+		// Append source until the matched string position
+		target.append(src.substr(i, pos - i));
+
+		// Replace string
+		target.append(to);
+		i = pos + from.size();
 	}
 
 	return target;

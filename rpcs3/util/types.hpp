@@ -7,17 +7,14 @@
 #include <utility>
 #include <chrono>
 #include <array>
+#include <tuple>
+#include <compare>
+#include <memory>
+#include <bit>
 
 using std::chrono::steady_clock;
 
 using namespace std::literals;
-
-#ifdef _MSC_VER
-#if !defined(__cpp_lib_bitops) && _MSC_VER < 1928
-#define __cpp_lib_bitops
-#endif
-#endif
-#include <bit>
 
 #ifndef __has_builtin
 	#define __has_builtin(x) 0
@@ -55,21 +52,16 @@ using namespace std::literals;
 #if __cpp_lib_bit_cast < 201806L
 namespace std
 {
-	template <class To, class From, typename = std::enable_if_t<sizeof(To) == sizeof(From)>>
-	constexpr To bit_cast(const From& from) noexcept
+	template <typename To, typename From>
+	[[nodiscard]] constexpr To bit_cast(const From& from) noexcept
 	{
-		static_assert(sizeof(To) == sizeof(From), "std::bit_cast<>: incompatible type size");
-
-		if constexpr ((std::is_same_v<std::remove_const_t<To>, std::remove_const_t<From>> && std::is_constructible_v<To, From>) || (std::is_integral_v<From> && std::is_integral_v<To>))
-		{
-			return static_cast<To>(from);
-		}
-
-		To result{};
-		__builtin_memcpy(&result, &from, sizeof(From));
-		return result;
+		return __builtin_bit_cast(To, from);
 	}
 }
+#endif
+
+#if defined(__INTELLISENSE__)
+#define consteval constexpr
 #endif
 
 using schar  = signed char;
@@ -80,11 +72,7 @@ using ulong  = unsigned long;
 using ullong = unsigned long long;
 using llong  = long long;
 
-#if __APPLE__
-using uptr = std::uint64_t;
-#else
 using uptr = std::uintptr_t;
-#endif
 
 using u8  = std::uint8_t;
 using u16 = std::uint16_t;
@@ -96,53 +84,6 @@ using s8  = std::int8_t;
 using s16 = std::int16_t;
 using s32 = std::int32_t;
 using s64 = std::int64_t;
-
-#if __APPLE__
-namespace std
-{
-	template <typename T, typename = std::enable_if_t<std::is_unsigned_v<T>>>
-	constexpr int countr_zero(T x) noexcept
-	{
-		if (x == 0)
-			return sizeof(T) * 8;
-		if constexpr (sizeof(T) <= sizeof(uint))
-			return __builtin_ctz(x);
-		else if constexpr (sizeof(T) <= sizeof(ulong))
-			return __builtin_ctzl(x);
-		else if constexpr (sizeof(T) <= sizeof(ullong))
-			return __builtin_ctzll(x);
-		else
-			static_assert(sizeof(T) <= sizeof(ullong));
-	}
-
-	template <typename T, typename = std::enable_if_t<std::is_unsigned_v<T>>>
-	constexpr int countr_one(T x) noexcept
-	{
-		return countr_zero<T>(~x);
-	}
-
-	template <typename T, typename = std::enable_if_t<std::is_unsigned_v<T>>>
-	constexpr int countl_zero(T x) noexcept
-	{
-		if (x == 0)
-			return sizeof(T) * 8;
-		if constexpr (sizeof(T) <= sizeof(uint))
-			return __builtin_clz(x) - (sizeof(uint) - sizeof(T)) * 8;
-		else if constexpr (sizeof(T) <= sizeof(ulong))
-			return __builtin_clzl(x) - (sizeof(ulong) - sizeof(T)) * 8;
-		else if constexpr (sizeof(T) <= sizeof(ullong))
-			return __builtin_clzll(x) - (sizeof(ullong) - sizeof(T)) * 8;
-		else
-			static_assert(sizeof(T) <= sizeof(ullong));
-	}
-
-	template <typename T, typename = std::enable_if_t<std::is_unsigned_v<T>>>
-	constexpr int countl_one(T x) noexcept
-	{
-		return countl_zero<T>(~x);
-	}
-}
-#endif
 
 // Get integral type from type size
 template <usz N>
@@ -208,22 +149,6 @@ using atomic_be_t = atomic_t<be_t<T>, Align>;
 template <typename T, usz Align = alignof(T)>
 using atomic_le_t = atomic_t<le_t<T>, Align>;
 
-// Extract T::simple_type if available, remove cv qualifiers
-template <typename T, typename = void>
-struct simple_type_helper
-{
-	using type = typename std::remove_cv<T>::type;
-};
-
-template <typename T>
-struct simple_type_helper<T, std::void_t<typename T::simple_type>>
-{
-	using type = typename T::simple_type;
-};
-
-template <typename T>
-using simple_t = typename simple_type_helper<T>::type;
-
 // Bool type equivalent
 class b8
 {
@@ -270,6 +195,7 @@ extern "C"
 	uchar _subborrow_u64(uchar, u64, u64, u64*);
 	u64 __shiftleft128(u64, u64, uchar);
 	u64 __shiftright128(u64, u64, uchar);
+	u64 _umul128(u64, u64, u64*);
 }
 
 // Unsigned 128-bit integer implementation (TODO)
@@ -303,6 +229,11 @@ struct alignas(16) u128
 		return lo;
 	}
 
+	constexpr explicit operator s64() const noexcept
+	{
+		return lo;
+	}
+
 	constexpr friend u128 operator+(const u128& l, const u128& r)
 	{
 		u128 value = l;
@@ -314,6 +245,13 @@ struct alignas(16) u128
 	{
 		u128 value = l;
 		value -= r;
+		return value;
+	}
+
+	constexpr friend u128 operator*(const u128& l, const u128& r)
+	{
+		u128 value = l;
+		value *= r;
 		return value;
 	}
 
@@ -431,6 +369,24 @@ struct alignas(16) u128
 		return *this;
 	}
 
+	constexpr u128& operator*=(const u128& r)
+	{
+		const u64 _hi = r.hi * lo + r.lo * hi;
+
+		if (std::is_constant_evaluated())
+		{
+			hi = (lo >> 32) * (r.lo >> 32) + (((lo >> 32) * (r.lo & 0xffffffff)) >> 32) + (((r.lo >> 32) * (lo & 0xffffffff)) >> 32);
+			lo = lo * r.lo;
+		}
+		else
+		{
+			lo = _umul128(lo, r.lo, &hi);
+		}
+
+		hi += _hi;
+		return *this;
+	}
+
 	constexpr u128& operator<<=(const u128& r)
 	{
 		if (std::is_constant_evaluated())
@@ -503,13 +459,43 @@ struct alignas(16) u128
 	}
 };
 
-// Signed 128-bit integer implementation (TODO)
-struct alignas(16) s128
+// Signed 128-bit integer implementation
+struct s128 : u128
 {
-	u64 lo;
-	s64 hi;
+	using u128::u128;
 
-	s128() = default;
+	constexpr s128 operator>>(u128 shift_value) const
+	{
+		s128 value = *this;
+		value >>= shift_value;
+		return value;
+	}
+
+	constexpr s128& operator>>=(const u128& r)
+	{
+		if (std::is_constant_evaluated())
+		{
+			if (r.hi == 0 && r.lo < 64)
+			{
+				lo = (lo >> r.lo) | (hi << (64 - r.lo));
+				hi = (static_cast<s64>(hi) >> r.lo);
+				return *this;
+			}
+			else if (r.hi == 0 && r.lo < 128)
+			{
+				s64 _lo = static_cast<s64>(hi) >> (r.lo - 64);
+				lo = _lo;
+				hi = _lo >> 63;
+				return *this;
+			}
+		}
+
+		const u64 v0 = static_cast<s64>(hi) >> (r.lo & 63);
+		const u64 v1 = __shiftright128(lo, hi, static_cast<uchar>(r.lo));
+		lo = (r.lo & 64) ? v0 : v1;
+		hi = (r.lo & 64) ? static_cast<s64>(hi) >> 63 : v0;
+		return *this;
+	}
 };
 #endif
 
@@ -517,48 +503,175 @@ template <>
 struct get_int_impl<16>
 {
 	using utype = u128;
+	using stype = s128;
 };
-
-// Return magic value for any unsigned type
-constexpr inline struct umax_helper
-{
-	constexpr umax_helper() noexcept = default;
-
-	template <typename T, typename S = simple_t<T>, typename = std::enable_if_t<std::is_unsigned_v<S>>>
-	constexpr bool operator==(const T& rhs) const
-	{
-		return rhs == static_cast<S>(-1);
-	}
-
-#if __cpp_impl_three_way_comparison >= 201711 && !__INTELLISENSE__
-#else
-	template <typename T>
-	friend constexpr std::enable_if_t<std::is_unsigned_v<simple_t<T>>, bool> operator==(const T& lhs, const umax_helper&)
-	{
-		return lhs == static_cast<simple_t<T>>(-1);
-	}
-#endif
-
-#if __cpp_impl_three_way_comparison >= 201711
-#else
-	template <typename T, typename S = simple_t<T>, typename = std::enable_if_t<std::is_unsigned_v<S>>>
-	constexpr bool operator!=(const T& rhs) const
-	{
-		return rhs != static_cast<S>(-1);
-	}
-
-	template <typename T>
-	friend constexpr std::enable_if_t<std::is_unsigned_v<simple_t<T>>, bool> operator!=(const T& lhs, const umax_helper&)
-	{
-		return lhs != static_cast<simple_t<T>>(-1);
-	}
-#endif
-} umax;
 
 enum class f16 : u16{};
 
 using f32 = float;
 using f64 = double;
+
+template <typename T>
+concept UnsignedInt = std::is_unsigned_v<std::common_type_t<T>> || std::is_same_v<std::common_type_t<T>, u128>;
+
+template <typename T>
+concept SignedInt = (std::is_signed_v<std::common_type_t<T>> && std::is_integral_v<std::common_type_t<T>>) || std::is_same_v<std::common_type_t<T>, s128>;
+
+template <typename T>
+concept FPInt = std::is_floating_point_v<std::common_type_t<T>> || std::is_same_v<std::common_type_t<T>, f16>;
+
+template <typename T>
+concept Integral = std::is_integral_v<std::common_type_t<T>> || std::is_same_v<std::common_type_t<T>, u128> || std::is_same_v<std::common_type_t<T>, s128>;
+
+template <typename T>
+constexpr T min_v;
+
+template <UnsignedInt T>
+constexpr std::common_type_t<T> min_v<T> = 0;
+
+template <SignedInt T>
+constexpr std::common_type_t<T> min_v<T> = static_cast<std::common_type_t<T>>(-1) << (sizeof(std::common_type_t<T>) * 8 - 1);
+
+template <>
+constexpr inline f16 min_v<f16>{0xfbffu};
+
+template <>
+constexpr inline f32 min_v<f32> = std::bit_cast<f32, u32>(0xff'7fffffu);
+
+template <>
+constexpr inline f64 min_v<f64> = std::bit_cast<f64, u64>(0xffe'7ffff'ffffffffu);
+
+template <FPInt T>
+constexpr std::common_type_t<T> min_v<T> = min_v<std::common_type_t<T>>;
+
+template <typename T>
+constexpr T max_v;
+
+template <UnsignedInt T>
+constexpr std::common_type_t<T> max_v<T> = -1;
+
+template <SignedInt T>
+constexpr std::common_type_t<T> max_v<T> = static_cast<std::common_type_t<T>>(~min_v<T>);
+
+template <>
+constexpr inline f16 max_v<f16>{0x7bffu};
+
+template <>
+constexpr inline f32 max_v<f32> = std::bit_cast<f32, u32>(0x7f'7fffffu);
+
+template <>
+constexpr inline f64 max_v<f64> = std::bit_cast<f64, u64>(0x7fe'fffff'ffffffffu);
+
+template <FPInt T>
+constexpr std::common_type_t<T> max_v<T> = max_v<std::common_type_t<T>>;
+
+// Return magic value for any unsigned type
+constexpr struct umax_impl_t
+{
+	template <UnsignedInt T>
+	constexpr bool operator==(const T& rhs) const
+	{
+		return rhs == max_v<T>;
+	}
+
+	template <UnsignedInt T>
+	constexpr std::strong_ordering operator<=>(const T& rhs) const
+	{
+		return rhs == max_v<T> ? std::strong_ordering::equal : std::strong_ordering::greater;
+	}
+
+	template <UnsignedInt T>
+	constexpr operator T() const
+	{
+		return max_v<T>;
+	}
+} umax;
+
+constexpr struct smin_impl_t
+{
+	template <SignedInt T>
+	constexpr bool operator==(const T& rhs) const
+	{
+		return rhs == min_v<T>;
+	}
+
+	template <SignedInt T>
+	constexpr std::strong_ordering operator<=>(const T& rhs) const
+	{
+		return rhs == min_v<T> ? std::strong_ordering::equal : std::strong_ordering::less;
+	}
+
+	template <SignedInt T>
+	constexpr operator T() const
+	{
+		return min_v<T>;
+	}
+} smin;
+
+constexpr struct smax_impl_t
+{
+	template <SignedInt T>
+	constexpr bool operator==(const T& rhs) const
+	{
+		return rhs == max_v<T>;
+	}
+
+	template <SignedInt T>
+	constexpr std::strong_ordering operator<=>(const T& rhs) const
+	{
+		return rhs == max_v<T> ? std::strong_ordering::equal : std::strong_ordering::greater;
+	}
+
+	template <SignedInt T>
+	constexpr operator T() const
+	{
+		return max_v<T>;
+	}
+} smax;
+
+// Compare signed or unsigned type with its max value
+constexpr struct amax_impl_t
+{
+	template <typename T> requires SignedInt<T> || UnsignedInt<T>
+	constexpr bool operator ==(const T& rhs) const
+	{
+		return rhs == max_v<T>;
+	}
+
+	template <typename T> requires SignedInt<T> || UnsignedInt<T>
+	constexpr std::strong_ordering operator <=>(const T& rhs) const
+	{
+		return max_v<T> <=> rhs;
+	}
+
+	template <typename T> requires SignedInt<T> || UnsignedInt<T>
+	constexpr operator T() const
+	{
+		return max_v<T>;
+	}
+} amax;
+
+// Compare signed or unsigned type with its minimal value (like zero or INT_MIN)
+constexpr struct amin_impl_t
+{
+	template <typename T> requires SignedInt<T> || UnsignedInt<T>
+	constexpr bool operator ==(const T& rhs) const
+	{
+		return rhs == min_v<T>;
+	}
+
+	template <typename T> requires SignedInt<T> || UnsignedInt<T>
+	constexpr std::strong_ordering operator <=>(const T& rhs) const
+	{
+		return min_v<T> <=> rhs;
+	}
+
+	template <typename T> requires SignedInt<T> || UnsignedInt<T>
+	constexpr operator T() const
+	{
+		return min_v<T>;
+	}
+} amin;
 
 template <typename T, typename T2>
 inline u32 offset32(T T2::*const mptr)
@@ -623,62 +736,25 @@ struct offset32_detail<T3 T4::*>
 	}
 };
 
-// Helper function, used by ""_u16, ""_u32, ""_u64
-constexpr u32 to_u8(char c)
-{
-	return static_cast<u8>(c);
-}
-
-// Convert 1-2-byte string to u16 value like reinterpret_cast does
+// Convert 0-2-byte string to u16 value like reinterpret_cast does
 constexpr u16 operator""_u16(const char* s, usz /*length*/)
 {
-	if constexpr (std::endian::little == std::endian::native)
-	{
-		return static_cast<u16>(to_u8(s[1]) << 8 | to_u8(s[0]));
-	}
-	else
-	{
-		return static_cast<u16>(to_u8(s[0]) << 8 | to_u8(s[1]));
-	}
+	char buf[2]{s[0], s[1]};
+	return std::bit_cast<u16>(buf);
 }
 
 // Convert 3-4-byte string to u32 value like reinterpret_cast does
 constexpr u32 operator""_u32(const char* s, usz /*length*/)
 {
-	if constexpr (std::endian::little == std::endian::native)
-	{
-		return to_u8(s[3]) << 24 | to_u8(s[2]) << 16 | to_u8(s[1]) << 8 | to_u8(s[0]);
-	}
-	else
-	{
-		return to_u8(s[0]) << 24 | to_u8(s[1]) << 16 | to_u8(s[2]) << 8 | to_u8(s[3]);
-	}
+	char buf[4]{s[0], s[1], s[2], s[3]};
+	return std::bit_cast<u32>(buf);
 }
 
-// Convert 5-6-byte string to u64 value like reinterpret_cast does
-constexpr u64 operator""_u48(const char* s, usz /*length*/)
+// Convert 5-8-byte string to u64 value like reinterpret_cast does
+constexpr u64 operator""_u64(const char* s, usz len)
 {
-	if constexpr (std::endian::little == std::endian::native)
-	{
-		return static_cast<u64>(to_u8(s[5]) << 8 | to_u8(s[4])) << 32 | to_u8(s[3]) << 24 | to_u8(s[2]) << 16 | to_u8(s[1]) << 8 | to_u8(s[0]);
-	}
-	else
-	{
-		return static_cast<u64>(to_u8(s[0]) << 8 | to_u8(s[1])) << 32 | to_u8(s[2]) << 24 | to_u8(s[3]) << 16 | to_u8(s[4]) << 8 | to_u8(s[5]);
-	}
-}
-
-// Convert 7-8-byte string to u64 value like reinterpret_cast does
-constexpr u64 operator""_u64(const char* s, usz /*length*/)
-{
-	if constexpr (std::endian::little == std::endian::native)
-	{
-		return static_cast<u64>(to_u8(s[7]) << 24 | to_u8(s[6]) << 16 | to_u8(s[5]) << 8 | to_u8(s[4])) << 32 | to_u8(s[3]) << 24 | to_u8(s[2]) << 16 | to_u8(s[1]) << 8 | to_u8(s[0]);
-	}
-	else
-	{
-		return static_cast<u64>(to_u8(s[0]) << 24 | to_u8(s[1]) << 16 | to_u8(s[2]) << 8 | to_u8(s[3])) << 32 | to_u8(s[4]) << 24 | to_u8(s[5]) << 16 | to_u8(s[6]) << 8 | to_u8(s[7]);
-	}
+	char buf[8]{s[0], s[1], s[2], s[3], s[4], (len < 6 ? '\0' : s[5]), (len < 7 ? '\0' : s[6]), (len < 8 ? '\0' : s[7])};
+	return std::bit_cast<u64>(buf);
 }
 
 #if !defined(__INTELLISENSE__) && !__has_builtin(__builtin_COLUMN) && !defined(_MSC_VER)
@@ -687,6 +763,86 @@ constexpr unsigned __builtin_COLUMN()
 	return -1;
 }
 #endif
+
+template <usz Size = umax>
+struct const_str_t
+{
+	static constexpr usz size = Size;
+
+	char8_t chars[Size + 1]{};
+
+	constexpr const_str_t(const char(&a)[Size + 1])
+	{
+		for (usz i = 0; i <= Size; i++)
+			chars[i] = a[i];
+	}
+
+	constexpr const_str_t(const char8_t(&a)[Size + 1])
+	{
+		for (usz i = 0; i <= Size; i++)
+			chars[i] = a[i];
+	}
+
+	operator const char*() const
+	{
+		return reinterpret_cast<const char*>(chars);
+	}
+
+	constexpr operator const char8_t*() const
+	{
+		return chars;
+	}
+};
+
+template <>
+struct const_str_t<umax>
+{
+	const usz size;
+
+	const union
+	{
+		const char8_t* chars;
+		const char* chars2;
+	};
+
+	const_str_t()
+		: size(0)
+		, chars(nullptr)
+	{
+	}
+
+	template <usz N>
+	constexpr const_str_t(const char8_t(&a)[N])
+		: size(N - 1)
+		, chars(+a)
+	{
+	}
+
+	template <usz N>
+	constexpr const_str_t(const char(&a)[N])
+		: size(N - 1)
+		, chars2(+a)
+	{
+	}
+
+	operator const char*() const
+	{
+		return std::launder(chars2);
+	}
+
+	constexpr operator const char8_t*() const
+	{
+		return chars;
+	}
+};
+
+template <usz Size>
+const_str_t(const char(&a)[Size]) -> const_str_t<Size - 1>;
+
+template <usz Size>
+const_str_t(const char8_t(&a)[Size]) -> const_str_t<Size - 1>;
+
+using const_str = const_str_t<>;
 
 struct src_loc
 {
@@ -698,12 +854,11 @@ struct src_loc
 
 namespace fmt
 {
-	[[noreturn]] void raw_verify_error(const src_loc& loc);
-	[[noreturn]] void raw_narrow_error(const src_loc& loc);
+	[[noreturn]] void raw_verify_error(const src_loc& loc, const char8_t* msg);
 }
 
 template <typename T>
-constexpr decltype(auto) ensure(T&& arg,
+constexpr decltype(auto) ensure(T&& arg, const_str msg = const_str(),
 	u32 line = __builtin_LINE(),
 	u32 col = __builtin_COLUMN(),
 	const char* file = __builtin_FILE(),
@@ -714,7 +869,7 @@ constexpr decltype(auto) ensure(T&& arg,
 		return std::forward<T>(arg);
 	}
 
-	fmt::raw_verify_error({line, col, file, func});
+	fmt::raw_verify_error({line, col, file, func}, msg);
 }
 
 // narrow() function details
@@ -784,8 +939,8 @@ struct narrow_impl<From, To, std::enable_if_t<std::is_signed<From>::value && std
 
 // Simple type enabled (TODO: allow for To as well)
 template <typename From, typename To>
-struct narrow_impl<From, To, std::void_t<typename From::simple_type>>
-	: narrow_impl<simple_t<From>, To>
+struct narrow_impl<From, To, std::enable_if_t<!std::is_same_v<std::common_type_t<From>, From>>>
+	: narrow_impl<std::common_type_t<From>, To>
 {
 };
 
@@ -799,8 +954,7 @@ template <typename To = void, typename From, typename = decltype(static_cast<To>
 	// Narrow check
 	if (narrow_impl<From, To>::test(value)) [[unlikely]]
 	{
-		// Pack value as formatting argument
-		fmt::raw_narrow_error({line, col, file, func});
+		fmt::raw_verify_error({line, col, file, func}, u8"Narrowing error");
 	}
 
 	return static_cast<To>(value);
@@ -821,7 +975,7 @@ template <typename CT, typename = decltype(static_cast<u32>(std::declval<CT>().s
 template <typename T, usz Size>
 [[nodiscard]] constexpr u32 size32(const T (&)[Size])
 {
-	static_assert(Size < UINT32_MAX, "Array is too big for 32-bit");
+	static_assert(Size < u32{umax}, "Array is too big for 32-bit");
 	return static_cast<u32>(Size);
 }
 
@@ -834,3 +988,100 @@ struct value_hash
 		return static_cast<usz>(value) >> Shift;
 	}
 };
+
+template <typename... T>
+struct fill_array_t
+{
+	std::tuple<T...> args;
+
+	template <typename V, usz Num>
+	constexpr std::unwrap_reference_t<V> get() const
+	{
+		return std::get<Num>(args);
+	}
+
+	template <typename U, usz N, usz... M, usz... Idx>
+	constexpr std::array<U, N> fill(std::index_sequence<M...>, std::index_sequence<Idx...>) const
+	{
+		return{(static_cast<void>(Idx), U(get<T, M>()...))...};
+	}
+
+	template <typename U, usz N>
+	constexpr operator std::array<U, N>() const
+	{
+		return fill<U, N>(std::make_index_sequence<sizeof...(T)>(), std::make_index_sequence<N>());
+	}
+};
+
+template <typename... T>
+constexpr auto fill_array(const T&... args)
+{
+	return fill_array_t<T...>{{args...}};
+}
+
+template <typename X, typename Y>
+concept PtrCastable = requires(const volatile X* x, const volatile Y* y)
+{
+	static_cast<const volatile Y*>(x);
+	static_cast<const volatile X*>(y);
+};
+
+template <typename X, typename Y> requires PtrCastable<X, Y>
+constexpr bool is_same_ptr()
+{
+	if constexpr (std::is_void_v<X> || std::is_void_v<Y> || std::is_same_v<std::remove_cv_t<X>, std::remove_cv_t<Y>>)
+	{
+		return true;
+	}
+	else if constexpr (sizeof(X) == sizeof(Y))
+	{
+		return true;
+	}
+	else
+	{
+		if (std::is_constant_evaluated())
+		{
+			bool result = false;
+
+			if constexpr (sizeof(X) < sizeof(Y))
+			{
+				std::allocator<Y> a{};
+				Y* ptr = a.allocate(1);
+				result = static_cast<X*>(ptr) == static_cast<void*>(ptr);
+				a.deallocate(ptr, 1);
+			}
+			else
+			{
+				std::allocator<X> a{};
+				X* ptr = a.allocate(1);
+				result = static_cast<Y*>(ptr) == static_cast<void*>(ptr);
+				a.deallocate(ptr, 1);
+			}
+
+			return result;
+		}
+		else
+		{
+			std::aligned_union_t<0, X, Y> s;
+			Y* ptr = reinterpret_cast<Y*>(&s);
+			return static_cast<X*>(ptr) == static_cast<void*>(ptr);
+		}
+	}
+}
+
+template <typename X, typename Y> requires PtrCastable<X, Y>
+constexpr bool is_same_ptr(const volatile Y* ptr)
+{
+	return static_cast<const volatile X*>(ptr) == static_cast<const volatile void*>(ptr);
+}
+
+template <typename X, typename Y>
+concept PtrSame = (is_same_ptr<X, Y>());
+
+namespace utils
+{
+	struct serial;
+}
+
+template <typename T>
+extern bool serialize(utils::serial& ar, T& obj);

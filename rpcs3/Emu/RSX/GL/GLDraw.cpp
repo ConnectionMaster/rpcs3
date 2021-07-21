@@ -285,14 +285,16 @@ void GLGSRender::load_texture_env()
 			fs_sampler_state[i] = std::make_unique<gl::texture_cache::sampled_image_descriptor>();
 
 		auto sampler_state = static_cast<gl::texture_cache::sampled_image_descriptor*>(fs_sampler_state[i].get());
-		if (m_samplers_dirty || m_textures_dirty[i] || m_gl_texture_cache.test_if_descriptor_expired(cmd, m_rtts, sampler_state))
+		const auto& tex = rsx::method_registers.fragment_textures[i];
+
+		if (m_samplers_dirty || m_textures_dirty[i] || m_gl_texture_cache.test_if_descriptor_expired(cmd, m_rtts, sampler_state, tex))
 		{
-			if (rsx::method_registers.fragment_textures[i].enabled())
+			if (tex.enabled())
 			{
-				*sampler_state = m_gl_texture_cache.upload_texture(cmd, rsx::method_registers.fragment_textures[i], m_rtts);
+				*sampler_state = m_gl_texture_cache.upload_texture(cmd, tex, m_rtts);
 
 				if (m_textures_dirty[i])
-					m_fs_sampler_states[i].apply(rsx::method_registers.fragment_textures[i], fs_sampler_state[i].get());
+					m_fs_sampler_states[i].apply(tex, fs_sampler_state[i].get());
 			}
 			else
 			{
@@ -312,14 +314,16 @@ void GLGSRender::load_texture_env()
 			vs_sampler_state[i] = std::make_unique<gl::texture_cache::sampled_image_descriptor>();
 
 		auto sampler_state = static_cast<gl::texture_cache::sampled_image_descriptor*>(vs_sampler_state[i].get());
-		if (m_samplers_dirty || m_vertex_textures_dirty[i] || m_gl_texture_cache.test_if_descriptor_expired(cmd, m_rtts, sampler_state))
+		const auto& tex = rsx::method_registers.vertex_textures[i];
+
+		if (m_samplers_dirty || m_vertex_textures_dirty[i] || m_gl_texture_cache.test_if_descriptor_expired(cmd, m_rtts, sampler_state, tex))
 		{
 			if (rsx::method_registers.vertex_textures[i].enabled())
 			{
 				*sampler_state = m_gl_texture_cache.upload_texture(cmd, rsx::method_registers.vertex_textures[i], m_rtts);
 
 				if (m_vertex_textures_dirty[i])
-					m_vs_sampler_states[i].apply(rsx::method_registers.vertex_textures[i], vs_sampler_state[i].get());
+					m_vs_sampler_states[i].apply(tex, vs_sampler_state[i].get());
 			}
 			else
 				*sampler_state = {};
@@ -359,7 +363,7 @@ void GLGSRender::bind_texture_env()
 		{
 			view->bind();
 
-			if (current_fragment_program.redirected_textures & (1 << i))
+			if (current_fragment_program.texture_state.redirected_textures & (1 << i))
 			{
 				_SelectTexture(GL_STENCIL_MIRRORS_START + i);
 
@@ -373,7 +377,7 @@ void GLGSRender::bind_texture_env()
 			auto target = gl::get_target(current_fragment_program.get_texture_dimension(i));
 			glBindTexture(target, m_null_textures[target]->id());
 
-			if (current_fragment_program.redirected_textures & (1 << i))
+			if (current_fragment_program.texture_state.redirected_textures & (1 << i))
 			{
 				_SelectTexture(GL_STENCIL_MIRRORS_START + i);
 				glBindTexture(target, m_null_textures[target]->id());
@@ -424,39 +428,41 @@ void GLGSRender::emit_geometry(u32 sub_index)
 		}
 	};
 
-	if (!sub_index)
+	auto& draw_call = rsx::method_registers.current_draw_clause;
+	const rsx::flags32_t vertex_state_mask = rsx::vertex_base_changed | rsx::vertex_arrays_changed;
+	const rsx::flags32_t vertex_state = (sub_index == 0) ? rsx::vertex_arrays_changed : draw_call.execute_pipeline_dependencies() & vertex_state_mask;
+
+	if (vertex_state & rsx::vertex_arrays_changed)
 	{
 		analyse_inputs_interleaved(m_vertex_layout);
-		if (!m_vertex_layout.validate())
+	}
+	else if (vertex_state & rsx::vertex_base_changed)
+	{
+		// Rebase vertex bases instead of
+		for (auto& info : m_vertex_layout.interleaved_blocks)
 		{
-			// Execute remainining pipeline barriers with NOP draw
-			do
-			{
-				rsx::method_registers.current_draw_clause.execute_pipeline_dependencies();
-			}
-			while (rsx::method_registers.current_draw_clause.next());
-
-			rsx::method_registers.current_draw_clause.end();
-			return;
+			const auto vertex_base_offset = rsx::method_registers.vertex_data_base_offset();
+			info.real_offset_address = rsx::get_address(rsx::get_vertex_offset_from_base(vertex_base_offset, info.base_offset), info.memory_location);
 		}
 	}
-	else
+
+	if (vertex_state && !m_vertex_layout.validate())
 	{
-		if (rsx::method_registers.current_draw_clause.execute_pipeline_dependencies() & rsx::vertex_base_changed)
+		// No vertex inputs enabled
+		// Execute remainining pipeline barriers with NOP draw
+		do
 		{
-			// Rebase vertex bases instead of
-			for (auto &info : m_vertex_layout.interleaved_blocks)
-			{
-				const auto vertex_base_offset = rsx::method_registers.vertex_data_base_offset();
-				info.real_offset_address = rsx::get_address(rsx::get_vertex_offset_from_base(vertex_base_offset, info.base_offset), info.memory_location);
-			}
-		}
+			draw_call.execute_pipeline_dependencies();
+		} while (draw_call.next());
+
+		draw_call.end();
+		return;
 	}
 
 	if (manually_flush_ring_buffers)
 	{
 		//Use approximations to reserve space. This path is mostly for debug purposes anyway
-		u32 approx_vertex_count = rsx::method_registers.current_draw_clause.get_elements_count();
+		u32 approx_vertex_count = draw_call.get_elements_count();
 		u32 approx_working_buffer_size = approx_vertex_count * 256;
 
 		//Allocate 256K heap if we have no approximation at this time (inlined array)
@@ -474,18 +480,18 @@ void GLGSRender::emit_geometry(u32 sub_index)
 		return;
 	}
 
-	const GLenum draw_mode = gl::draw_mode(rsx::method_registers.current_draw_clause.primitive);
+	const GLenum draw_mode = gl::draw_mode(draw_call.primitive);
 	update_vertex_env(upload_info);
 
 	if (!upload_info.index_info)
 	{
-		if (rsx::method_registers.current_draw_clause.is_single_draw())
+		if (draw_call.is_single_draw())
 		{
 			glDrawArrays(draw_mode, 0, upload_info.vertex_draw_count);
 		}
 		else
 		{
-			const auto subranges = rsx::method_registers.current_draw_clause.get_subranges();
+			const auto subranges = draw_call.get_subranges();
 			const auto draw_count = subranges.size();
 			const auto driver_caps = gl::get_driver_caps();
 			bool use_draw_arrays_fallback = false;
@@ -538,7 +544,7 @@ void GLGSRender::emit_geometry(u32 sub_index)
 	{
 		const GLenum index_type = std::get<0>(*upload_info.index_info);
 		const u32 index_offset = std::get<1>(*upload_info.index_info);
-		const bool restarts_valid = gl::is_primitive_native(rsx::method_registers.current_draw_clause.primitive) && !rsx::method_registers.current_draw_clause.is_disjoint_primitive;
+		const bool restarts_valid = gl::is_primitive_native(draw_call.primitive) && !draw_call.is_disjoint_primitive;
 
 		if (gl_state.enable(restarts_valid && rsx::method_registers.restart_index_enabled(), GL_PRIMITIVE_RESTART))
 		{
@@ -547,13 +553,13 @@ void GLGSRender::emit_geometry(u32 sub_index)
 
 		m_index_ring_buffer->bind();
 
-		if (rsx::method_registers.current_draw_clause.is_single_draw())
+		if (draw_call.is_single_draw())
 		{
 			glDrawElements(draw_mode, upload_info.vertex_draw_count, index_type, reinterpret_cast<GLvoid*>(u64{index_offset}));
 		}
 		else
 		{
-			const auto subranges = rsx::method_registers.current_draw_clause.get_subranges();
+			const auto subranges = draw_call.get_subranges();
 			const auto draw_count = subranges.size();
 			const u32 type_scale = (index_type == GL_UNSIGNED_SHORT) ? 1 : 2;
 			uptr index_ptr = index_offset;
@@ -565,7 +571,7 @@ void GLGSRender::emit_geometry(u32 sub_index)
 
 			for (const auto &range : subranges)
 			{
-				const auto index_size = get_index_count(rsx::method_registers.current_draw_clause.primitive, range.count);
+				const auto index_size = get_index_count(draw_call.primitive, range.count);
 				counts[dst_index] = index_size;
 				offsets[dst_index++] = reinterpret_cast<const GLvoid*>(index_ptr);
 

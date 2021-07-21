@@ -27,14 +27,14 @@ namespace vk
 		swapchain_image_RPCS3(render_device& dev, const memory_type_mapping& memory_map, u32 width, u32 height)
 			:image(dev, memory_map.device_local, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_IMAGE_TYPE_2D, VK_FORMAT_B8G8R8A8_UNORM, width, height, 1, 1, 1,
 				VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_TILING_OPTIMAL,
-				VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, 0)
+				VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, 0, VMM_ALLOCATION_POOL_SWAPCHAIN)
 		{
 			m_width = width;
 			m_height = height;
 			current_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 
 			m_dma_buffer = std::make_unique<buffer>(dev, m_width * m_height * 4, memory_map.host_visible_coherent,
-				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, VK_BUFFER_USAGE_TRANSFER_DST_BIT, 0);
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, VK_BUFFER_USAGE_TRANSFER_DST_BIT, 0, VMM_ALLOCATION_POOL_SWAPCHAIN);
 		}
 
 		void do_dma_transfer(command_buffer& cmd)
@@ -280,7 +280,7 @@ namespace vk
 				dev.destroy();
 		}
 
-		VkResult present(VkSemaphore /*semaphore*/, u32 index) override
+		VkResult present(VkSemaphore /*semaphore*/, u32 /*index*/) override
 		{
 			fmt::throw_exception("Native macOS swapchain is not implemented yet!");
 		}
@@ -621,13 +621,7 @@ namespace vk
 				return false;
 			}
 
-			VkExtent2D swapchainExtent;
-			if (surface_descriptors.currentExtent.width == UINT32_MAX)
-			{
-				swapchainExtent.width = m_width;
-				swapchainExtent.height = m_height;
-			}
-			else
+			if (surface_descriptors.currentExtent.width != umax)
 			{
 				if (surface_descriptors.currentExtent.width == 0 || surface_descriptors.currentExtent.height == 0)
 				{
@@ -635,7 +629,6 @@ namespace vk
 					return false;
 				}
 
-				swapchainExtent = surface_descriptors.currentExtent;
 				m_width = surface_descriptors.currentExtent.width;
 				m_height = surface_descriptors.currentExtent.height;
 			}
@@ -767,8 +760,12 @@ namespace vk
 			present.swapchainCount = 1;
 			present.pSwapchains = &m_vk_swapchain;
 			present.pImageIndices = &image;
-			present.waitSemaphoreCount = 1;
-			present.pWaitSemaphores = &semaphore;
+
+			if (semaphore != VK_NULL_HANDLE)
+			{
+				present.waitSemaphoreCount = 1;
+				present.pWaitSemaphores = &semaphore;
+			}
 
 			return _vkQueuePresentKHR(dev.get_present_queue(), &present);
 		}

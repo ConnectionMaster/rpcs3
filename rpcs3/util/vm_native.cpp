@@ -3,6 +3,7 @@
 #include "util/vm.hpp"
 #include "util/asm.hpp"
 #ifdef _WIN32
+#include "Utilities/File.h"
 #include "util/dyn_lib.hpp"
 #include <Windows.h>
 #else
@@ -56,6 +57,9 @@ namespace utils
 #if defined(MADV_DONTDUMP) && defined(MADV_DODUMP)
 	constexpr int c_madv_no_dump = MADV_DONTDUMP;
 	constexpr int c_madv_dump = MADV_DODUMP;
+#elif defined(MADV_NOCORE) && defined(MADV_CORE)
+	constexpr int c_madv_no_dump = MADV_NOCORE;
+	constexpr int c_madv_dump = MADV_CORE;
 #else
 	constexpr int c_madv_no_dump = 0;
 	constexpr int c_madv_dump = 0;
@@ -120,7 +124,7 @@ namespace utils
 
 		auto ptr = ::mmap(use_addr, size, PROT_NONE, MAP_ANON | MAP_PRIVATE | c_map_noreserve, -1, 0);
 
-		if (ptr == reinterpret_cast<void*>(UINT64_MAX))
+		if (ptr == reinterpret_cast<void*>(uptr{umax}))
 		{
 			return nullptr;
 		}
@@ -157,6 +161,10 @@ namespace utils
 		{
 			ensure(::madvise(ptr, orig_size, c_madv_no_dump) != -1);
 		}
+		else
+		{
+			ensure(::madvise(ptr, orig_size, c_madv_free) != -1);
+		}
 
 		return ptr;
 #endif
@@ -169,7 +177,15 @@ namespace utils
 #else
 		const u64 ptr64 = reinterpret_cast<u64>(pointer);
 		ensure(::mprotect(reinterpret_cast<void*>(ptr64 & -4096), size + (ptr64 & 4095), +prot) != -1);
-		ensure(::madvise(reinterpret_cast<void*>(ptr64 & -4096), size + (ptr64 & 4095), MADV_WILLNEED | c_madv_dump) != -1);
+
+		if constexpr (c_madv_dump != 0)
+		{
+			ensure(::madvise(reinterpret_cast<void*>(ptr64 & -4096), size + (ptr64 & 4095), c_madv_dump) != -1);
+		}
+		else
+		{
+			ensure(::madvise(reinterpret_cast<void*>(ptr64 & -4096), size + (ptr64 & 4095), MADV_WILLNEED) != -1);
+		}
 #endif
 	}
 
@@ -179,11 +195,15 @@ namespace utils
 		ensure(::VirtualFree(pointer, size, MEM_DECOMMIT));
 #else
 		const u64 ptr64 = reinterpret_cast<u64>(pointer);
-		ensure(::mmap(pointer, size, PROT_NONE, MAP_FIXED | MAP_ANON | MAP_PRIVATE | c_map_noreserve, -1, 0) != reinterpret_cast<void*>(UINT64_MAX));
+		ensure(::mmap(pointer, size, PROT_NONE, MAP_FIXED | MAP_ANON | MAP_PRIVATE | c_map_noreserve, -1, 0) != reinterpret_cast<void*>(uptr{umax}));
 
 		if constexpr (c_madv_no_dump != 0)
 		{
 			ensure(::madvise(reinterpret_cast<void*>(ptr64 & -4096), size + (ptr64 & 4095), c_madv_no_dump) != -1);
+		}
+		else
+		{
+			ensure(::madvise(reinterpret_cast<void*>(ptr64 & -4096), size + (ptr64 & 4095), c_madv_free) != -1);
 		}
 #endif
 	}
@@ -195,7 +215,7 @@ namespace utils
 		memory_commit(pointer, size, prot);
 #else
 		const u64 ptr64 = reinterpret_cast<u64>(pointer);
-		ensure(::mmap(pointer, size, +prot, MAP_FIXED | MAP_ANON | MAP_PRIVATE, -1, 0) != reinterpret_cast<void*>(UINT64_MAX));
+		ensure(::mmap(pointer, size, +prot, MAP_FIXED | MAP_ANON | MAP_PRIVATE, -1, 0) != reinterpret_cast<void*>(uptr{umax}));
 
 		if constexpr (c_madv_hugepage != 0)
 		{
@@ -205,7 +225,14 @@ namespace utils
 			}
 		}
 
-		ensure(::madvise(reinterpret_cast<void*>(ptr64 & -4096), size + (ptr64 & 4095), MADV_WILLNEED | c_madv_dump) != -1);
+		if constexpr (c_madv_dump != 0)
+		{
+			ensure(::madvise(reinterpret_cast<void*>(ptr64 & -4096), size + (ptr64 & 4095), c_madv_dump) != -1);
+		}
+		else
+		{
+			ensure(::madvise(reinterpret_cast<void*>(ptr64 & -4096), size + (ptr64 & 4095), MADV_WILLNEED) != -1);
+		}
 #endif
 	}
 
@@ -257,13 +284,11 @@ namespace utils
 	}
 
 	shm::shm(u32 size, u32 flags)
-		: m_size(utils::align(size, 0x10000))
-		, m_flags(flags)
-		, m_ptr(nullptr)
+		: m_flags(flags)
+		, m_size(utils::align(size, 0x10000))
 	{
 #ifdef _WIN32
-		m_handle = ::CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_EXECUTE_READWRITE, 0, m_size, NULL);
-		ensure(m_handle != INVALID_HANDLE_VALUE);
+		m_handle = ensure(::CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_EXECUTE_READWRITE, 0, m_size, nullptr));
 #elif __linux__
 		m_file = -1;
 
@@ -301,6 +326,167 @@ namespace utils
 #endif
 	}
 
+	shm::shm(u64 size, const std::string& storage)
+		: m_size(utils::align(size, 0x10000))
+	{
+#ifdef _WIN32
+		fs::file f;
+
+		// Get system version
+		[[maybe_unused]] static const DWORD version_major = *reinterpret_cast<const DWORD*>(__readgsqword(0x60) + 0x118);
+
+		auto set_sparse = [](HANDLE h, usz m_size) -> bool
+		{
+			FILE_SET_SPARSE_BUFFER arg{.SetSparse = true};
+			FILE_BASIC_INFO info0{};
+			ensure(GetFileInformationByHandleEx(h, FileBasicInfo, &info0, sizeof(info0)));
+
+			if ((info0.FileAttributes & FILE_ATTRIBUTE_ARCHIVE) || (~info0.FileAttributes & FILE_ATTRIBUTE_TEMPORARY))
+			{
+				info0.FileAttributes &= ~FILE_ATTRIBUTE_ARCHIVE;
+				info0.FileAttributes |= FILE_ATTRIBUTE_TEMPORARY;
+				ensure(SetFileInformationByHandle(h, FileBasicInfo, &info0, sizeof(info0)));
+			}
+
+			if ((info0.FileAttributes & FILE_ATTRIBUTE_SPARSE_FILE) == 0 && version_major <= 7)
+			{
+				MessageBoxW(0, L"RPCS3 needs to be restarted to create sparse file rpcs3_vm.", L"RPCS3", MB_ICONEXCLAMATION);
+			}
+
+			if ((info0.FileAttributes & FILE_ATTRIBUTE_SPARSE_FILE) || DeviceIoControl(h, FSCTL_SET_SPARSE, &arg, sizeof(arg), nullptr, 0, nullptr, nullptr))
+			{
+				if ((info0.FileAttributes & FILE_ATTRIBUTE_SPARSE_FILE) == 0 && version_major <= 7)
+				{
+					std::abort();
+				}
+
+				FILE_STANDARD_INFO info;
+				FILE_END_OF_FILE_INFO _eof{};
+				ensure(GetFileInformationByHandleEx(h, FileStandardInfo, &info, sizeof(info)));
+				ensure(GetFileSizeEx(h, &_eof.EndOfFile));
+
+				if (info.AllocationSize.QuadPart && _eof.EndOfFile.QuadPart == m_size)
+				{
+					// Truncate file since it may be dirty (fool-proof)
+					DWORD ret = 0;
+					FILE_ALLOCATED_RANGE_BUFFER dummy{};
+					dummy.Length.QuadPart = m_size;
+
+					if (!DeviceIoControl(h, FSCTL_QUERY_ALLOCATED_RANGES, &dummy, sizeof(dummy), nullptr, 0, &ret, 0) || ret)
+					{
+						_eof.EndOfFile.QuadPart = 0;
+					}
+				}
+
+				if (_eof.EndOfFile.QuadPart != m_size)
+				{
+					// Reset file size to 0 if it doesn't match
+					_eof.EndOfFile.QuadPart = 0;
+					ensure(SetFileInformationByHandle(h, FileEndOfFileInfo, &_eof, sizeof(_eof)));
+				}
+
+				return true;
+			}
+
+			return false;
+		};
+
+		const std::string storage2 = fs::get_temp_dir() + "rpcs3_vm_sparse.tmp";
+		const std::string storage3 = fs::get_cache_dir() + "rpcs3_vm_sparse.tmp";
+
+		if (!storage.empty())
+		{
+			// Explicitly specified storage
+			ensure(f.open(storage, fs::read + fs::write + fs::create));
+		}
+		else if (!f.open(storage2, fs::read + fs::write + fs::create) || !set_sparse(f.get_handle(), m_size))
+		{
+			// Fallback storage
+			ensure(f.open(storage3, fs::read + fs::write + fs::create));
+		}
+		else
+		{
+			goto check;
+		}
+
+		if (!set_sparse(f.get_handle(), m_size))
+		{
+			MessageBoxW(0, L"Failed to initialize sparse file.\nCan't find a filesystem with sparse file support (NTFS).", L"RPCS3", MB_ICONERROR);
+		}
+
+	check:
+		if (f.size() != m_size)
+		{
+			// Resize the file gradually (bug workaround)
+			for (usz i = 0; i < m_size / (1024 * 1024 * 256); i++)
+			{
+				ensure(f.trunc((i + 1) * (1024 * 1024 * 256)));
+			}
+
+			ensure(f.trunc(m_size));
+		}
+
+		m_handle = ensure(::CreateFileMappingW(f.get_handle(), nullptr, PAGE_READWRITE, 0, 0, nullptr));
+#else
+
+		// TODO: check overcommit configuration of other supported platforms to bypass rpcs3_vm creation
+#ifdef __linux__
+		if (const char c = fs::file("/proc/sys/vm/overcommit_memory").read<char>(); c == '0' || c == '1')
+		{
+			// Simply use memfd for overcommit memory
+			m_file = ::memfd_create_("", 0);
+			ensure(m_file >= 0);
+			ensure(::ftruncate(m_file, m_size) >= 0);
+			return;
+		}
+		else
+		{
+			fprintf(stderr, "Reading /proc/sys/vm/overcommit_memory: %c", c);
+		}
+#endif
+
+		if (!storage.empty())
+		{
+			m_file = ::open(storage.c_str(), O_RDWR | O_CREAT, S_IWUSR | S_IRUSR);
+		}
+		else
+		{
+			m_file = ::open((fs::get_cache_dir() + "rpcs3_vm_sparse.tmp").c_str(), O_RDWR | O_CREAT, S_IWUSR | S_IRUSR);
+		}
+
+		ensure(m_file >= 0);
+		struct ::stat stats;
+		ensure(::fstat(m_file, &stats) >= 0);
+
+		if (!(stats.st_size ^ m_size) && !stats.st_blocks)
+		{
+			// Already initialized
+			return;
+		}
+
+		// Truncate file since it may be dirty (fool-proof)
+		ensure(::ftruncate(m_file, 0) >= 0);
+		ensure(::ftruncate(m_file, 0x100000) >= 0);
+		stats.st_size = 0x100000;
+
+#ifdef SEEK_DATA
+		errno = EINVAL;
+		if (stats.st_blocks * 512 >= 0x100000 && ::lseek(m_file, 0, SEEK_DATA) ^ stats.st_size && errno != ENXIO)
+		{
+			fmt::throw_exception("Failed to initialize sparse file in '%s'\n"
+				"It seems this filesystem doesn't support sparse files (%d).\n",
+				storage.empty() ? fs::get_cache_dir().c_str() : storage.c_str(), +errno);
+		}
+#endif
+
+		if (stats.st_size ^ m_size)
+		{
+			// Fix file size
+			ensure(::ftruncate(m_file, m_size) >= 0);
+		}
+#endif
+	}
+
 	shm::~shm()
 	{
 		this->unmap_self();
@@ -312,7 +498,7 @@ namespace utils
 #endif
 	}
 
-	u8* shm::map(void* ptr, protection prot) const
+	u8* shm::map(void* ptr, protection prot, bool cow) const
 	{
 #ifdef _WIN32
 		DWORD access = FILE_MAP_WRITE;
@@ -326,6 +512,11 @@ namespace utils
 		case protection::rx:
 			access |= FILE_MAP_EXECUTE;
 			break;
+		}
+
+		if (cow)
+		{
+			access |= FILE_MAP_COPY;
 		}
 
 		if (auto ret = static_cast<u8*>(::MapViewOfFileEx(m_handle, access, 0, 0, m_size, ptr)))
@@ -349,7 +540,7 @@ namespace utils
 
 		if (ptr64)
 		{
-			const auto result = ::mmap(reinterpret_cast<void*>(ptr64), m_size, +prot, MAP_SHARED | MAP_FIXED, m_file, 0);
+			const auto result = ::mmap(reinterpret_cast<void*>(ptr64), m_size, +prot, (cow ? MAP_PRIVATE : MAP_SHARED) | MAP_FIXED, m_file, 0);
 
 			return reinterpret_cast<u8*>(result);
 		}
@@ -358,7 +549,7 @@ namespace utils
 			const u64 res64 = reinterpret_cast<u64>(::mmap(reinterpret_cast<void*>(ptr64), m_size + 0xf000, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0));
 
 			const u64 aligned = utils::align(res64, 0x10000);
-			const auto result = ::mmap(reinterpret_cast<void*>(aligned), m_size, +prot, MAP_SHARED | MAP_FIXED, m_file, 0);
+			const auto result = ::mmap(reinterpret_cast<void*>(aligned), m_size, +prot, (cow ? MAP_PRIVATE : MAP_SHARED) | MAP_FIXED, m_file, 0);
 
 			// Now cleanup remnants
 			if (aligned > res64)
@@ -376,17 +567,17 @@ namespace utils
 #endif
 	}
 
-	u8* shm::try_map(void* ptr, protection prot) const
+	u8* shm::try_map(void* ptr, protection prot, bool cow) const
 	{
 		// Non-null pointer shall be specified
 		const auto target = ensure(reinterpret_cast<u8*>(reinterpret_cast<u64>(ptr) & -0x10000));
 
 #ifdef _WIN32
-		return this->map(target, prot);
+		return this->map(target, prot, cow);
 #else
-		const auto result = reinterpret_cast<u8*>(::mmap(reinterpret_cast<void*>(target), m_size, +prot, MAP_SHARED, m_file, 0));
+		const auto result = reinterpret_cast<u8*>(::mmap(reinterpret_cast<void*>(target), m_size, +prot, (cow ? MAP_PRIVATE : MAP_SHARED), m_file, 0));
 
-		if (result == reinterpret_cast<void*>(UINT64_MAX))
+		if (result == reinterpret_cast<void*>(uptr{umax}))
 		{
 			[[unlikely]] return nullptr;
 		}
@@ -395,7 +586,7 @@ namespace utils
 #endif
 	}
 
-	u8* shm::map_critical(void* ptr, protection prot)
+	u8* shm::map_critical(void* ptr, protection prot, bool cow)
 	{
 		const auto target = reinterpret_cast<u8*>(reinterpret_cast<u64>(ptr) & -0x10000);
 
@@ -420,7 +611,7 @@ namespace utils
 		}
 #endif
 
-		return this->map(target, prot);
+		return this->map(target, prot, cow);
 	}
 
 	u8* shm::map_self(protection prot)
@@ -486,6 +677,7 @@ namespace utils
 			return;
 		}
 #else
+		// This method is faster but leaves mapped remnants of the shm (until overwritten)
 		ensure(::mprotect(target, m_size, PROT_NONE) != -1);
 #endif
 	}

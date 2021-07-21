@@ -12,10 +12,9 @@
 
 #include <deque>
 #include <thread>
-#include <string_view>
 
 // attr_protocol (waiting scheduling policy)
-enum lv2_protocol : u32
+enum lv2_protocol : u8
 {
 	SYS_SYNC_FIFO                = 0x1, // First In, First Out Order
 	SYS_SYNC_PRIORITY            = 0x2, // Priority Order
@@ -61,6 +60,8 @@ enum
 	SYS_SYNC_ATTR_ADAPTIVE_MASK  = 0xf000,
 };
 
+enum ppu_thread_status : u32;
+
 // Base class for some kernel objects (shared set of 8192 objects).
 struct lv2_obj
 {
@@ -73,17 +74,27 @@ struct lv2_obj
 private:
 	enum thread_cmd : s32
 	{
-		yield_cmd = INT32_MIN,
+		yield_cmd = smin,
 		enqueue_cmd,
 	};
 
 	// Function executed under IDM mutex, error will make the object creation fail and the error will be returned
 	CellError on_id_create()
 	{
+		exists++;
 		return {};
 	}
 
 public:
+
+	// Existence validation (workaround for shared-ptr ref-counting)
+	atomic_t<u32> exists = 0;
+
+	template <typename Ptr>
+	static bool check(Ptr&& ptr)
+	{
+		return ptr && ptr->exists;
+	}
 
 	static std::string name64(u64 name_u64)
 	{
@@ -95,22 +106,22 @@ public:
 		str.erase(std::remove_if(str.begin(), str.end(), [](uchar c){ return !std::isprint(c); }), str.end());
 
 		return str;
-	};
+	}
 
-	// Find and remove the object from the container (deque or vector)
+	// Find and remove the object from the deque container
 	template <typename T, typename E>
-	static T* unqueue(std::deque<T*>& queue, E* object)
+	static T unqueue(std::deque<T>& queue, E object)
 	{
 		for (auto found = queue.cbegin(), end = queue.cend(); found != end; found++)
 		{
 			if (*found == object)
 			{
 				queue.erase(found);
-				return static_cast<T*>(object);
+				return static_cast<T>(object);
 			}
 		}
 
-		return nullptr;
+		return {};
 	}
 
 	template <typename E, typename T>
@@ -155,7 +166,7 @@ private:
 	static bool awake_unlocked(cpu_thread*, s32 prio = enqueue_cmd);
 
 public:
-	static constexpr u64 max_timeout = UINT64_MAX / 1000;
+	static constexpr u64 max_timeout = u64{umax} / 1000;
 
 	static void sleep(cpu_thread& cpu, const u64 timeout = 0);
 
@@ -176,12 +187,20 @@ public:
 		g_to_awake.clear();
 	}
 
+	static ppu_thread_status ppu_state(ppu_thread* ppu, bool lock_idm = true, bool lock_lv2 = true);
+
 	static inline void append(cpu_thread* const thread)
 	{
 		g_to_awake.emplace_back(thread);
 	}
 
 	static void cleanup();
+
+	template <typename T>
+	static inline u64 get_key(const T& attr)
+	{
+		return (attr.pshared == SYS_SYNC_PROCESS_SHARED ? +attr.ipc_key : 0);
+	}
 
 	template <typename T, typename F>
 	static error_code create(u32 pshared, u64 ipc_key, s32 flags, F&& make, bool key_not_zero = true)
@@ -199,114 +218,119 @@ public:
 			{
 			case SYS_SYNC_NEWLY_CREATED:
 			case SYS_SYNC_NOT_CARE:
-			{
-				std::shared_ptr<T> result = make();
-
-				CellError error{};
-
-				if (!ipc_manager<T, u64>::add(ipc_key, [&]()
-				{
-					if (!idm::import<lv2_obj, T>([&]()
-					{
-						if (result && (error = result->on_id_create()))
-							result.reset();
-						return result;
-					}))
-					{
-						result.reset();
-					}
-
-					return result;
-				}, &result))
-				{
-					if (error)
-					{
-						return error;
-					}
-
-					if (flags == SYS_SYNC_NEWLY_CREATED)
-					{
-						return CELL_EEXIST;
-					}
-
-					error = CELL_EAGAIN;
-
-					if (!idm::import<lv2_obj, T>([&]() { if (result && (error = result->on_id_create())) result.reset(); return std::move(result); }))
-					{
-						return error;
-					}
-
-					return CELL_OK;
-				}
-				else if (!result)
-				{
-					return error ? CELL_EAGAIN : error;
-				}
-				else
-				{
-					return CELL_OK;
-				}
-			}
 			case SYS_SYNC_NOT_CREATE:
 			{
-				auto result = ipc_manager<T, u64>::get(ipc_key);
-
-				if (!result)
-				{
-					return CELL_ESRCH;
-				}
-
-				CellError error = CELL_EAGAIN;
-
-				if (!idm::import<lv2_obj, T>([&]() { if (result && (error = result->on_id_create())) result.reset(); return std::move(result); }))
-				{
-					return error;
-				}
-
-				return CELL_OK;
+				break;
 			}
-			default:
-			{
-				return CELL_EINVAL;
+			default: return CELL_EINVAL;
 			}
-			}
+
+			break;
 		}
 		case SYS_SYNC_NOT_PROCESS_SHARED:
 		{
+			break;
+		}
+		default: return CELL_EINVAL;
+		}
+
+		// EAGAIN for IDM IDs shortage
+		CellError error = CELL_EAGAIN;
+
+		if (!idm::import<lv2_obj, T>([&]() -> std::shared_ptr<T>
+		{
 			std::shared_ptr<T> result = make();
 
-			CellError error = CELL_EAGAIN;
-
-			if (!idm::import<lv2_obj, T>([&]() { if (result && (error = result->on_id_create())) result.reset(); return std::move(result); }))
+			auto finalize_construct = [&]() -> std::shared_ptr<T>
 			{
-				return error;
+				if ((error = result->on_id_create()))
+				{
+					result.reset();
+				}
+
+				return std::move(result);
+			};
+
+			if (pshared != SYS_SYNC_PROCESS_SHARED)
+			{
+				// Creation of unique (non-shared) object handle
+				return finalize_construct();
 			}
 
-			return CELL_OK;
-		}
-		default:
+			auto& ipc_container = g_fxo->get<ipc_manager<T, u64>>();
+
+			if (flags == SYS_SYNC_NOT_CREATE)
+			{
+				result = ipc_container.get(ipc_key);
+
+				if (!result)
+				{
+					error = CELL_ESRCH;
+					return result;
+				}
+
+				// Run on_id_create() on existing object
+				return finalize_construct();
+			}
+
+			bool added = false;
+			std::tie(added, result) = ipc_container.add(ipc_key, finalize_construct, flags != SYS_SYNC_NEWLY_CREATED);
+
+			if (!added)
+			{
+				if (flags == SYS_SYNC_NEWLY_CREATED)
+				{
+					// Object already exists but flags does not allow it
+					error = CELL_EEXIST;
+
+					// We specified we do not want to peek pointer's value, result must be empty
+					AUDIT(!result);
+					return result;
+				}
+
+				// Run on_id_create() on existing object
+				return finalize_construct();
+			}
+
+			return result;
+		}))
 		{
-			return CELL_EINVAL;
+			return error;
 		}
+
+		return CELL_OK;
+	}
+
+	template <typename T>
+	static void on_id_destroy(T& obj, u64 ipc_key, u64 pshared = -1)
+	{
+		if (pshared == umax)
+		{
+			// Default is to check key
+			pshared = ipc_key != 0;
+		}
+
+		if (obj.exists-- == 1u && pshared)
+		{
+			g_fxo->get<ipc_manager<T, u64>>().remove(ipc_key);
 		}
 	}
 
 	template <bool IsUsleep = false, bool Scale = true>
 	static bool wait_timeout(u64 usec, cpu_thread* const cpu = {})
 	{
-		static_assert(UINT64_MAX / max_timeout >= 100, "max timeout is not valid for scaling");
+		static_assert(u64{umax} / max_timeout >= 100, "max timeout is not valid for scaling");
 
 		if constexpr (Scale)
 		{
 			// Scale time
-			usec = std::min<u64>(usec, UINT64_MAX / 100) * 100 / g_cfg.core.clocks_scale;
+			usec = std::min<u64>(usec, u64{umax} / 100) * 100 / g_cfg.core.clocks_scale;
 		}
 
 		// Clamp
 		usec = std::min<u64>(usec, max_timeout);
 
 		u64 passed = 0;
-		u64 remaining;
 
 		const u64 start_time = get_system_time();
 
@@ -327,7 +351,7 @@ public:
 
 		while (usec >= passed)
 		{
-			remaining = usec - passed;
+			u64 remaining = usec - passed;
 #ifdef __linux__
 			// NOTE: Assumption that timer initialization has succeeded
 			u64 host_min_quantum = IsUsleep && remaining <= 1000 ? 10 : 50;
@@ -382,10 +406,10 @@ public:
 		return true;
 	}
 
-private:
 	// Scheduler mutex
 	static shared_mutex g_mutex;
 
+private:
 	// Pending list of threads to run
 	static thread_local std::vector<class cpu_thread*> g_to_awake;
 

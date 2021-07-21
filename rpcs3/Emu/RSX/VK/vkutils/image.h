@@ -35,6 +35,10 @@ namespace vk
 
 		void validate(const vk::render_device& dev, const VkImageCreateInfo& info) const;
 
+	protected:
+		image() = default;
+		void create_impl(const vk::render_device& dev, u32 access_flags, u32 memory_type_index, vmm_allocation_pool allocation_pool);
+
 	public:
 		VkImage value = VK_NULL_HANDLE;
 		VkComponentMapping native_component_map = { VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A };
@@ -55,6 +59,7 @@ namespace vk
 			VkImageTiling tiling,
 			VkImageUsageFlags usage,
 			VkImageCreateFlags image_flags,
+			vmm_allocation_pool allocation_pool,
 			rsx::format_class format_class = RSX_FORMAT_CLASS_UNDEFINED);
 
 		virtual ~image();
@@ -81,7 +86,10 @@ namespace vk
 		void change_layout(const command_buffer& cmd, VkImageLayout new_layout);
 		void change_layout(const command_buffer& cmd, VkImageLayout new_layout, u32 new_queue_family);
 
-	private:
+		// Debug utils
+		void set_debug_name(const std::string& name);
+
+	protected:
 		VkDevice m_device;
 	};
 
@@ -115,8 +123,9 @@ namespace vk
 
 	class viewable_image : public image
 	{
-	private:
+	protected:
 		std::unordered_multimap<u32, std::unique_ptr<vk::image_view>> views;
+		viewable_image* clone();
 
 	public:
 		using image::image;

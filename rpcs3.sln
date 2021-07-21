@@ -2,7 +2,7 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 16
 VisualStudioVersion = 16.0.29306.81
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "asmjit", "asmjitsrc\asmjit.vcxproj", "{AC40FF01-426E-4838-A317-66354CEFAE88}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "asmjit", "3rdparty\asmjit\asmjit.vcxproj", "{AC40FF01-426E-4838-A317-66354CEFAE88}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "emucore", "rpcs3\emucore.vcxproj", "{C4A10229-4712-4BD2-B63E-50D93C67A038}"
 	ProjectSection(ProjectDependencies) = postProject
@@ -19,17 +19,17 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "XAudio", "rpcs3\XAudio.vcxp
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "OpenAL", "rpcs3\OpenAL.vcxproj", "{30A05C4D-F5FD-421C-A864-17A64BDEAA75}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "pnglibconf", "3rdparty\pnglibconf.vcxproj", "{EB33566E-DA7F-4D28-9077-88C0B7C77E35}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "pnglibconf", "3rdparty\libpng\pnglibconf.vcxproj", "{EB33566E-DA7F-4D28-9077-88C0B7C77E35}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "libpng", "3rdparty\libpng.vcxproj", "{D6973076-9317-4EF2-A0B8-B7A18AC0713E}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "libpng", "3rdparty\libpng\libpng.vcxproj", "{D6973076-9317-4EF2-A0B8-B7A18AC0713E}"
 	ProjectSection(ProjectDependencies) = postProject
 		{60F89955-91C6-3A36-8000-13C592FEC2DF} = {60F89955-91C6-3A36-8000-13C592FEC2DF}
 		{EB33566E-DA7F-4D28-9077-88C0B7C77E35} = {EB33566E-DA7F-4D28-9077-88C0B7C77E35}
 	EndProjectSection
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "zlib", "3rdparty\zlib.vcxproj", "{60F89955-91C6-3A36-8000-13C592FEC2DF}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "zlib", "3rdparty\zlib\zlib.vcxproj", "{60F89955-91C6-3A36-8000-13C592FEC2DF}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "glslang-build", "Vulkan\glslang-build\glslang-build.vcxproj", "{8F85B6CC-250F-4ACA-A617-E820A74E3E3C}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "glslang", "3rdparty\glslang\glslang.vcxproj", "{8F85B6CC-250F-4ACA-A617-E820A74E3E3C}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "VKGSRender", "rpcs3\VKGSRender.vcxproj", "{3EE5F075-B546-42C4-B6A8-E3CCEF38B78D}"
 	ProjectSection(ProjectDependencies) = postProject
@@ -58,22 +58,22 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "rpcs3", "rpcs3\rpcs3.vcxpro
 		{349EE8F9-7D25-4909-AAF5-FF3FADE72187} = {349EE8F9-7D25-4909-AAF5-FF3FADE72187}
 	EndProjectSection
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "hidapi", "3rdparty\hidapi.vcxproj", "{A107C21C-418A-4697-BB10-20C3AA60E2E4}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "hidapi", "3rdparty\hidapi\hidapi.vcxproj", "{A107C21C-418A-4697-BB10-20C3AA60E2E4}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "xxhash", "3rdparty\xxhash.vcxproj", "{939FE206-1182-ABC3-1234-FEAB88E98404}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "libusb-1.0 (static)", "3rdparty\libusb_static.vcxproj", "{349EE8F9-7D25-4909-AAF5-FF3FADE72187}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "libusb-1.0 (static)", "3rdparty\libusb\libusb_static.vcxproj", "{349EE8F9-7D25-4909-AAF5-FF3FADE72187}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "7zlib", "3rdparty\7zlib.vcxproj", "{5B146DEA-9ACE-4D32-A7FD-3F42464DD69C}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "7zlib", "3rdparty\7z\7zlib.vcxproj", "{5B146DEA-9ACE-4D32-A7FD-3F42464DD69C}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "wolfssl", "3rdparty\wolfssl.vcxproj", "{73973223-5EE8-41CA-8E88-1D60E89A237B}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "libcurl", "3rdparty\libcurl.vcxproj", "{DA6F56B4-06A4-441D-AD70-AC5A7D51FADB}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "libcurl", "3rdparty\curl\libcurl.vcxproj", "{DA6F56B4-06A4-441D-AD70-AC5A7D51FADB}"
 	ProjectSection(ProjectDependencies) = postProject
 		{73973223-5EE8-41CA-8E88-1D60E89A237B} = {73973223-5EE8-41CA-8E88-1D60E89A237B}
 	EndProjectSection
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "spirv-tools-build", "Vulkan\spirv-tools-build\spirv-tools-build.vcxproj", "{4CBD3DDD-5555-49A4-A44D-DD3D8CB516A1}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "SPIRV", "3rdparty\SPIRV\spirv.vcxproj", "{4CBD3DDD-5555-49A4-A44D-DD3D8CB516A1}"
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "3rdParty", "3rdParty", "{6C3B64A0-8F8A-4DC4-8C0B-D71EBEED7FA8}"
 EndProject

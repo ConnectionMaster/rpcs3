@@ -5,8 +5,6 @@
 #include "util/shared_ptr.hpp"
 
 #include <string>
-#include <memory>
-#include <string_view>
 
 #include "mutex.h"
 #include "lockless.h"
@@ -37,14 +35,12 @@ enum class thread_state : u32
 	mask = 3
 };
 
-class need_wakeup {};
-
 template <class Context>
 class named_thread;
 
 class thread_base;
 
-template <typename Ctx, typename X = void, typename... Args>
+template <typename Ctx, typename... Args>
 struct result_storage
 {
 	static constexpr bool empty = true;
@@ -52,8 +48,8 @@ struct result_storage
 	using type = void;
 };
 
-template <typename Ctx, typename... Args>
-struct result_storage<Ctx, std::enable_if_t<!std::is_void_v<std::invoke_result_t<Ctx, Args&&...>>>, Args...>
+template <typename Ctx, typename... Args> requires (!std::is_void_v<std::invoke_result_t<Ctx, Args&&...>>)
+struct result_storage<Ctx, Args...>
 {
 	using T = std::invoke_result_t<Ctx, Args&&...>;
 
@@ -86,6 +82,12 @@ struct result_storage<Ctx, std::enable_if_t<!std::is_void_v<std::invoke_result_t
 	}
 };
 
+template <typename T>
+concept NamedThreadName = requires (const T& t)
+{
+	std::string(t.thread_name);
+};
+
 // Base class for task queue (linked list)
 class thread_future
 {
@@ -111,12 +113,6 @@ public:
 		exec.wait<atomic_wait::op_ne>(nullptr);
 	}
 };
-
-template <typename T, typename = void>
-struct thread_thread_name : std::bool_constant<false> {};
-
-template <typename T>
-struct thread_thread_name<T, std::void_t<decltype(named_thread<T>::thread_name)>> : std::bool_constant<true> {};
 
 // Thread base class
 class thread_base
@@ -168,7 +164,7 @@ private:
 	friend class named_thread;
 
 protected:
-	thread_base(native_entry, std::string_view name);
+	thread_base(native_entry, std::string name);
 
 	~thread_base();
 
@@ -228,16 +224,22 @@ public:
 	}
 
 	// Set current thread name (not recommended)
-	static void set_name(std::string_view name)
+	static void set_name(std::string name)
 	{
 		g_tls_this_thread->m_tname.store(make_single<std::string>(name));
+		g_tls_this_thread->set_name(std::move(name));
 	}
 
 	// Set thread name (not recommended)
 	template <typename T>
-	static void set_name(named_thread<T>& thread, std::string_view name)
+	static void set_name(named_thread<T>& thread, std::string name)
 	{
 		static_cast<thread_base&>(thread).m_tname.store(make_single<std::string>(name));
+
+		if (g_tls_this_thread == std::addressof(static_cast<thread_base&>(thread)))
+		{
+			g_tls_this_thread->set_name(std::move(name));
+		}
 	}
 
 	template <typename T>
@@ -481,20 +483,20 @@ class named_thread final : public Context, result_storage<Context>, thread_base
 	friend class thread_ctrl;
 
 public:
-	// Default constructor
-	template <bool Valid = std::is_default_constructible_v<Context> && thread_thread_name<Context>(), typename = std::enable_if_t<Valid>>
-	named_thread()
-		: Context()
-		, thread(trampoline, Context::thread_name)
+	// Forwarding constructor with default name (also potentially the default constructor)
+	template <typename... Args> requires (std::is_constructible_v<Context, Args&&...>) && (NamedThreadName<Context>)
+	named_thread(Args&&... args)
+		: Context(std::forward<Args>(args)...)
+		, thread(trampoline, std::string(Context::thread_name))
 	{
 		thread::start();
 	}
 
 	// Normal forwarding constructor
-	template <typename... Args, typename = std::enable_if_t<std::is_constructible_v<Context, Args&&...>>>
-	named_thread(std::string_view name, Args&&... args)
+	template <typename... Args> requires (std::is_constructible_v<Context, Args&&...>)
+	named_thread(std::string name, Args&&... args)
 		: Context(std::forward<Args>(args)...)
-		, thread(trampoline, name)
+		, thread(trampoline, std::move(name))
 	{
 		thread::start();
 	}
@@ -502,7 +504,7 @@ public:
 	// Lambda constructor, also the implicit deduction guide candidate
 	named_thread(std::string_view name, Context&& f)
 		: Context(std::forward<Context>(f))
-		, thread(trampoline, name)
+		, thread(trampoline, std::string(name))
 	{
 		thread::start();
 	}
@@ -614,20 +616,24 @@ public:
 		return static_cast<thread_state>(thread::m_sync.load() & 3);
 	}
 
-	// Try to abort by assigning thread_state::aborting (UB if assigning different state)
+	// Try to abort by assigning thread_state::aborting/finished
+	// Join thread by thread_state::finished
 	named_thread& operator=(thread_state s)
 	{
-		if (s == thread_state::aborting && thread::m_sync.fetch_op([](u64& v){ return !(v & 3) && (v |= 1); }).second)
+		if constexpr (std::is_assignable_v<Context&, thread_state>)
 		{
-			if (s == thread_state::aborting)
-			{
-				thread::m_sync.notify_one(1);
-			}
+			static_cast<Context&>(*this) = s;
+		}
 
-			if constexpr (std::is_base_of_v<need_wakeup, Context>)
-			{
-				this->wake_up();
-			}
+		if (s >= thread_state::aborting && thread::m_sync.fetch_op([](u64& v){ return !(v & 3) && (v |= 1); }).second)
+		{
+			thread::m_sync.notify_one(1);
+		}
+
+		if (s == thread_state::finished)
+		{
+			// This participates in emulation stopping, use destruction-alike semantics
+			thread::join(true);
 		}
 
 		return *this;
@@ -636,9 +642,8 @@ public:
 	// Context type doesn't need virtual destructor
 	~named_thread()
 	{
-		// Assign aborting state forcefully
-		operator=(thread_state::aborting);
-		thread::join(true);
+		// Assign aborting state forcefully and join thread
+		operator=(thread_state::finished);
 
 		if constexpr (!result::empty)
 		{

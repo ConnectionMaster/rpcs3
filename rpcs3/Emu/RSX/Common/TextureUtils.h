@@ -1,8 +1,8 @@
 #pragma once
 
 #include "../RSXTexture.h"
-#include "Utilities/span.h"
 
+#include <span>
 #include <vector>
 
 namespace rsx
@@ -36,17 +36,77 @@ namespace rsx
 		bytes = 2
 	};
 
-	enum surface_access : u32
+	class surface_access // This is simply a modified enum class
 	{
-		read = 0,
-		write = 1,
-		transfer = 2
+	public:
+		// Publicly visible enumerators
+		enum
+		{
+			shader_read = 0,
+			shader_write = 1,
+			transfer_read = 2,
+			transfer_write = 4,
+
+			// Arbitrary r/w flags, use with caution.
+			memory_write = 8,
+			memory_read = 16,
+
+			// Not r/w but signifies a GPU reference to this object.
+			gpu_reference = 32
+		};
+
+	private:
+		// Meta
+		enum
+		{
+			all_writes = (shader_write | transfer_write | memory_write),
+			all_reads = (shader_read | transfer_read | memory_read),
+			all_transfer = (transfer_read | transfer_write)
+		};
+
+		u32 value_;
+
+	public:
+		// Ctor
+		surface_access(u32 value) : value_(value)
+		{}
+
+		// Quick helpers
+		inline bool is_read() const
+		{
+			return !(value_ & ~all_reads);
+		}
+
+		inline bool is_write() const
+		{
+			return !(value_ & ~all_writes);
+		}
+
+		inline bool is_transfer() const
+		{
+			return !(value_ & ~all_transfer);
+		}
+
+		inline bool is_transfer_or_read() const // Special; reads and transfers generate MSAA load operations
+		{
+			return !(value_ & ~(all_transfer | all_reads));
+		}
+
+		bool operator == (const surface_access& other) const
+		{
+			return value_ == other.value_;
+		}
+
+		bool operator == (u32 other) const
+		{
+			return value_ == other;
+		}
 	};
 
 	// Defines how the underlying PS3-visible memory backed by a texture is accessed
 	namespace format_class_
 	{
-		// TODO: Remove when enum import is supported by GCC
+		// TODO: Remove when enum import is supported by clang
 		enum format_class : u8
 		{
 			RSX_FORMAT_CLASS_UNDEFINED = 0,
@@ -99,7 +159,7 @@ namespace rsx
 
 	struct subresource_layout
 	{
-		gsl::span<const std::byte> data;
+		std::span<const std::byte> data;
 		u16 width_in_texel;
 		u16 height_in_texel;
 		u16 width_in_block;
@@ -154,13 +214,14 @@ namespace rsx
 	std::vector<subresource_layout> get_subresources_layout(const rsx::fragment_texture &texture);
 	std::vector<subresource_layout> get_subresources_layout(const rsx::vertex_texture &texture);
 
-	texture_memory_info upload_texture_subresource(gsl::span<std::byte> dst_buffer, const subresource_layout &src_layout, int format, bool is_swizzled, texture_uploader_capabilities& caps);
+	texture_memory_info upload_texture_subresource(std::span<std::byte> dst_buffer, const subresource_layout &src_layout, int format, bool is_swizzled, texture_uploader_capabilities& caps);
 
 	u8 get_format_block_size_in_bytes(int format);
 	u8 get_format_block_size_in_texel(int format);
 	u8 get_format_block_size_in_bytes(rsx::surface_color_format format);
 	u8 get_format_block_size_in_bytes(rsx::surface_depth_format2 format);
 
+	bool is_compressed_host_format(u32 format); // Returns true for host-compressed formats (DXT)
 	u8 get_format_sample_count(rsx::surface_antialiasing antialias);
 	u32 get_max_depth_value(rsx::surface_depth_format2 format);
 	bool is_depth_stencil_format(rsx::surface_depth_format2 format);

@@ -21,11 +21,11 @@ namespace rsx
 		chain_direction_backward, // Only lower-base-address pages chain (unless they overlap the fault)
 	};
 
-	enum texture_create_flags
+	enum class component_order
 	{
-		default_component_order = 0,
-		native_component_order = 1,
-		swapped_native_component_order = 2,
+		default_ = 0,
+		native = 1,
+		swapped_native = 2,
 	};
 
 	enum memory_read_flags
@@ -95,10 +95,9 @@ namespace rsx
 			AUDIT(deferred_flush());
 			if (cause == deferred_read)
 				return read;
-			else if (cause == deferred_write)
+			if (cause == deferred_write)
 				return write;
-			else
-				fmt::throw_exception("Unreachable");
+			fmt::throw_exception("Unreachable");
 		}
 
 		constexpr invalidation_cause defer() const
@@ -106,10 +105,9 @@ namespace rsx
 			AUDIT(!deferred_flush());
 			if (cause == read)
 				return deferred_read;
-			else if (cause == write)
+			if (cause == write)
 				return deferred_write;
-			else
-				fmt::throw_exception("Unreachable");
+			fmt::throw_exception("Unreachable");
 		}
 
 		constexpr invalidation_cause() : cause(invalid) {}

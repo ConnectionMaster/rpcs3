@@ -71,12 +71,12 @@ auto_pause_settings_dialog::auto_pause_settings_dialog(QWidget *parent) : QDialo
 }
 
 // Copied some from AutoPause.
-void auto_pause_settings_dialog::LoadEntries(void)
+void auto_pause_settings_dialog::LoadEntries()
 {
 	m_entries.clear();
 	m_entries.reserve(16);
 
-	fs::file list(fs::get_config_dir() + "pause.bin");
+	const fs::file list(fs::get_config_dir() + "pause.bin");
 
 	if (list)
 	{
@@ -99,7 +99,7 @@ void auto_pause_settings_dialog::LoadEntries(void)
 // Copied some from AutoPause.
 // Tip: This one doesn't check for the file is being read or not.
 // This would always use a 0xFFFFFFFF as end of the pause.bin
-void auto_pause_settings_dialog::SaveEntries(void)
+void auto_pause_settings_dialog::SaveEntries()
 {
 	fs::file list(fs::get_config_dir() + "pause.bin", fs::rewrite);
 	//System calls ID and Function calls ID are all u32 iirc.
@@ -115,7 +115,7 @@ void auto_pause_settings_dialog::SaveEntries(void)
 	list.write(&num, sizeof(u32));
 }
 
-void auto_pause_settings_dialog::UpdateList(void)
+void auto_pause_settings_dialog::UpdateList()
 {
 	const int entries_size = static_cast<int>(m_entries.size());
 	m_pause_list->clearContents();
@@ -179,7 +179,7 @@ void auto_pause_settings_dialog::ShowContextMenu(const QPoint &pos)
 	{
 		m_entries.emplace_back(0xFFFFFFFF);
 		UpdateList();
-		int idx = static_cast<int>(m_entries.size()) - 1;
+		const int idx = static_cast<int>(m_entries.size()) - 1;
 		m_pause_list->selectRow(idx);
 		OnEntryConfig(idx, true);
 	});
@@ -202,6 +202,11 @@ void auto_pause_settings_dialog::OnRemove()
 
 void auto_pause_settings_dialog::keyPressEvent(QKeyEvent *event)
 {
+	if (event->isAutoRepeat())
+	{
+		return;
+	}
+
 	if (event->key() == Qt::Key_Delete)
 	{
 		OnRemove();
@@ -257,7 +262,7 @@ AutoPauseConfigDialog::AutoPauseConfigDialog(QWidget* parent, auto_pause_setting
 void AutoPauseConfigDialog::OnOk()
 {
 	bool ok;
-	ullong value = m_id->text().toULongLong(&ok, 16);
+	const ullong value = m_id->text().toULongLong(&ok, 16);
 
 	m_entry = value;
 	*m_presult = m_entry;
@@ -274,11 +279,11 @@ void AutoPauseConfigDialog::OnCancel()
 	close();
 }
 
-void AutoPauseConfigDialog::OnUpdateValue()
+void AutoPauseConfigDialog::OnUpdateValue() const
 {
 	bool ok;
 	const ullong value = m_id->text().toULongLong(&ok, 16);
-	const bool is_ok = ok && value <= UINT32_MAX;
+	const bool is_ok = ok && value <= u32{umax};
 
 	m_current_converted->setText(tr("Current value: %1 (%2)").arg(value, 8, 16).arg(is_ok ? tr("OK") : tr("Conversion failed")));
 }

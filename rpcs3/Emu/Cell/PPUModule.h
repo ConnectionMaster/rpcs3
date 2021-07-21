@@ -75,8 +75,8 @@ class ppu_static_module final
 public:
 	const std::string name;
 
-	std::unordered_map<u32, ppu_static_function, value_hash<u32>> functions;
-	std::unordered_map<u32, ppu_static_variable, value_hash<u32>> variables;
+	std::unordered_map<u32, ppu_static_function, value_hash<u32>> functions{};
+	std::unordered_map<u32, ppu_static_variable, value_hash<u32>> variables{};
 
 public:
 	ppu_static_module(const char* name);
@@ -248,6 +248,7 @@ public:
 	static const ppu_static_module cellVpost;
 	static const ppu_static_module libad_async;
 	static const ppu_static_module libad_core;
+	static const ppu_static_module libfs_utility_init;
 	static const ppu_static_module libmedi;
 	static const ppu_static_module libmixer;
 	static const ppu_static_module libsnd3;

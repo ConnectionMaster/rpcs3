@@ -101,11 +101,6 @@ namespace rsx
 		{
 			return cpu_range == other.cpu_range && format == other.format && context == other.context;
 		}
-
-		bool operator!=(const texture_cache_predictor_key& other) const
-		{
-			return !operator==(other);
-		}
 	};
 
 	/**
@@ -201,7 +196,7 @@ namespace rsx
 			if (history_size == 0)
 			{
 				// We need some history to be able to take a guess
-				return UINT32_MAX;
+				return -1;
 			}
 			else if (history_size == 1)
 			{
@@ -214,7 +209,7 @@ namespace rsx
 
 				const u32 stop_when_found_matches = 4;
 				u32 matches_found                 = 0;
-				u32 guess                         = UINT32_MAX;
+				u32 guess                         = -1;
 
 				for (u32 i = 0; i < history_size; i++)
 				{
@@ -254,7 +249,7 @@ namespace rsx
 
 		void calculate_next_guess(bool reset)
 		{
-			if (reset || m_guessed_writes == UINT32_MAX || m_writes_since_last_flush > m_guessed_writes)
+			if (reset || m_guessed_writes == umax || m_writes_since_last_flush > m_guessed_writes)
 			{
 				m_guessed_writes = guess_number_of_writes();
 			}
@@ -265,7 +260,7 @@ namespace rsx
 		{
 			confidence                = starting_confidence;
 			m_writes_since_last_flush = 0;
-			m_guessed_writes          = UINT32_MAX;
+			m_guessed_writes          = -1;
 			write_history.clear();
 		}
 

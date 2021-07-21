@@ -56,7 +56,7 @@ union alignas(16) v128
 	reversed_array_t<f64> dr;
 
 	u128 _u;
-	//s128 _s;
+	s128 _s;
 
 #ifdef _MSC_VER
 	template <typename T>
@@ -91,6 +91,8 @@ union alignas(16) v128
 	__m128i vi;
 	__m128d vd;
 #endif
+
+	using enable_bitcopy = std::true_type;
 
 	static v128 from64(u64 _0, u64 _1 = 0)
 	{
@@ -206,8 +208,6 @@ union alignas(16) v128
 	static inline v128 fma32f(v128 a, const v128& b, const v128& c);
 
 	bool operator==(const v128& right) const;
-
-	bool operator!=(const v128& right) const;
 
 	// result = (~left) & (right)
 	static inline v128 andnot(const v128& left, const v128& right);

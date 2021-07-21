@@ -2,6 +2,7 @@
 #include "sys_sync.h"
 #include "sys_fs.h"
 
+#include "Emu/Cell/PPUModule.h"
 #include "Emu/Cell/PPUThread.h"
 #include "Crypto/unedat.h"
 #include "Emu/System.h"
@@ -19,6 +20,57 @@ lv2_fs_mount_point g_mp_sys_dev_usb{"", 512, 4096, lv2_mp_flag::no_uid_gid};
 lv2_fs_mount_point g_mp_sys_dev_bdvd{"", 2048, 65536, lv2_mp_flag::read_only + lv2_mp_flag::no_uid_gid};
 lv2_fs_mount_point g_mp_sys_host_root{"", 512, 512, lv2_mp_flag::strict_get_block_size + lv2_mp_flag::no_uid_gid};
 lv2_fs_mount_point g_mp_sys_dev_flash{"", 512, 8192, lv2_mp_flag::read_only + lv2_mp_flag::no_uid_gid};
+lv2_fs_mount_point g_mp_sys_dev_flash2{ "", 512, 8192, lv2_mp_flag::no_uid_gid }; // TODO confirm
+lv2_fs_mount_point g_mp_sys_dev_flash3{ "", 512, 8192, lv2_mp_flag::read_only + lv2_mp_flag::no_uid_gid }; // TODO confirm
+
+template<>
+void fmt_class_string<lv2_file>::format(std::string& out, u64 arg)
+{
+	const auto& file = get_object(arg);
+
+	std::string_view type_s;
+	switch (file.type)
+	{
+	case lv2_file_type::regular: type_s = "Regular file"; break;
+	case lv2_file_type::sdata: type_s = "SDATA"; break;
+	case lv2_file_type::edata: type_s = "EDATA"; break;
+	}
+
+	auto get_size = [](u64 size) -> std::string
+	{
+		if (size == umax)
+		{
+			return "N/A";
+		}
+
+		std::string size_str = fmt::format("0x%05x ", size);
+		switch (std::bit_width(size) / 10 * 10)
+		{
+		case 64: size_str = "0"s; break;
+		case 0: fmt::append(size_str, "(%u)", size); break;
+		case 10: fmt::append(size_str, "(%gKB)", size / 1024.); break;
+		case 20: fmt::append(size_str, "(%gMB)", size / (1024. * 1024)); break;
+
+		default:
+		case 30: fmt::append(size_str, "(%gGB)", size / (1024. * 1024 * 1024)); break;
+		}
+	
+		return size_str;
+	};
+
+	const usz pos = file.file ? file.file.pos() : umax;
+	const usz size = file.file ? file.file.size() : umax;
+
+	fmt::append(out, u8"%s, “%s”, Mode: 0x%x, Flags: 0x%x, Pos: %s, Size: %s", type_s, file.name.data(), file.mode, file.flags, get_size(pos), get_size(size));
+}
+
+template<>
+void fmt_class_string<lv2_dir>::format(std::string& out, u64 arg)
+{
+	const auto& dir = get_object(arg);
+
+	fmt::append(out, u8"Directory, “%s”, Entries: %u/%u", dir.name.data(), std::min<u64>(dir.pos, dir.entries.size()), dir.entries.size());
+}
 
 bool verify_mself(const fs::file& mself_file)
 {
@@ -119,6 +171,10 @@ lv2_fs_mount_point* lv2_fs_object::get_mp(std::string_view filename)
 			return &g_mp_sys_host_root;
 		if (mp_name == "dev_flash"sv)
 			return &g_mp_sys_dev_flash;
+		if (mp_name == "dev_flash2"sv)
+			return &g_mp_sys_dev_flash2;
+		if (mp_name == "dev_flash3"sv)
+			return &g_mp_sys_dev_flash3;
 
 		// Default
 		return &g_mp_sys_dev_hdd0;
@@ -297,11 +353,12 @@ lv2_file::open_raw_result_t lv2_file::open_raw(const std::string& local_path, s3
 	case CELL_FS_O_RDONLY: open_mode += fs::read; break;
 	case CELL_FS_O_WRONLY: open_mode += fs::write; break;
 	case CELL_FS_O_RDWR: open_mode += fs::read + fs::write; break;
+	default: break;
 	}
 
 	if (mp->flags & lv2_mp_flag::read_only)
 	{
-		if (flags & CELL_FS_O_ACCMODE || flags & (CELL_FS_O_CREAT | CELL_FS_O_TRUNC))
+		if ((flags & CELL_FS_O_ACCMODE) != CELL_FS_O_RDONLY && fs::is_file(local_path))
 		{
 			return {CELL_EPERM};
 		}
@@ -392,9 +449,9 @@ lv2_file::open_raw_result_t lv2_file::open_raw(const std::string& local_path, s3
 		if (mp->flags & lv2_mp_flag::read_only)
 		{
 			// Failed to create file on read-only FS (file doesn't exist)
-			if (flags & CELL_FS_O_CREAT)
+			if (flags & CELL_FS_O_ACCMODE && flags & CELL_FS_O_CREAT)
 			{
-				return {CELL_EROFS};
+				return {CELL_EPERM};
 			}
 		}
 
@@ -410,21 +467,6 @@ lv2_file::open_raw_result_t lv2_file::open_raw(const std::string& local_path, s3
 		}
 
 		return {CELL_EIO};
-	}
-
-	if (mp->flags & lv2_mp_flag::read_only)
-	{
-		// Failed to create file on read-only FS (file exists)
-		if (flags & CELL_FS_O_CREAT && flags & CELL_FS_O_EXCL)
-		{
-			return {CELL_EEXIST};
-		}
-
-		// Failed to truncate file on read-only FS
-		if (flags & CELL_FS_O_TRUNC)
-		{
-			return {CELL_EROFS};
-		}
 	}
 
 	if (flags & CELL_FS_O_MSELF && !verify_mself(file))
@@ -494,7 +536,7 @@ lv2_file::open_result_t lv2_file::open(std::string_view vpath, s32 flags, s32 mo
 	std::string path;
 	const std::string local_path = vfs::get(vpath, nullptr, &path);
 
-	const auto mp = lv2_fs_object::get_mp(path);
+	const auto mp = lv2_fs_object::get_mp(vpath);
 
 	if (mp == &g_mp_sys_dev_root)
 	{
@@ -777,11 +819,11 @@ error_code sys_fs_opendir(ppu_thread& ppu, vm::cptr<char> path, vm::ptr<u32> fd)
 
 	std::lock_guard lock(mp->mutex);
 
-	fs::dir dir(local_path);
+	const fs::dir dir(local_path);
 
 	if (!dir)
 	{
-		switch (auto error = fs::g_tls_error)
+		switch (const auto error = fs::g_tls_error)
 		{
 		case fs::error::noent:
 		{
@@ -1288,6 +1330,18 @@ error_code sys_fs_fcntl(ppu_thread& ppu, u32 fd, u32 op, vm::ptr<void> _arg, u32
 
 	switch (op)
 	{
+	case 0x80000004: // Unknown
+	{
+		if (_size > 4)
+		{
+			return CELL_EINVAL;
+		}
+
+		const auto arg = vm::static_ptr_cast<u32>(_arg);
+		*arg = 0;
+		break;
+	}
+
 	case 0x80000006: // cellFsAllocateFileAreaByFdWithInitialData
 	{
 		break;
@@ -1702,9 +1756,53 @@ error_code sys_fs_fcntl(ppu_thread& ppu, u32 fd, u32 op, vm::ptr<void> _arg, u32
 		break;
 	}
 
-	case 0x00000025: // cellFsSdataOpenWithVersion
+	case 0xe0000025: // cellFsSdataOpenWithVersion
 	{
-		break;
+		const auto arg = vm::static_ptr_cast<lv2_file_e0000025>(_arg);
+
+		if (arg->size != 0x30u)
+		{
+			sys_fs.error("sys_fs_fcntl(0xe0000025): invalid size (0x%x)", arg->size);
+			break;
+		}
+
+		if (arg->_x4 != 0x10u || arg->_x8 != 0x28u)
+		{
+			sys_fs.error("sys_fs_fcntl(0xe0000025): invalid args (0x%x, 0x%x)", arg->_x4, arg->_x8);
+			break;
+		}
+
+		std::string_view vpath{ arg->name.get_ptr(), arg->name_size };
+		vpath = vpath.substr(0, vpath.find_first_of('\0'));
+
+		sys_fs.notice("sys_fs_fcntl(0xe0000025): %s", vpath);
+
+		be_t<u64> sdata_identifier = 0x18000000010;
+
+		lv2_file::open_result_t result = lv2_file::open(vpath, 0, 0, &sdata_identifier, 8);
+
+		if (result.error)
+		{
+			return result.error;
+		}
+
+		if (const u32 id = idm::import<lv2_fs_object, lv2_file>([&]() -> std::shared_ptr<lv2_file>
+		{
+			if (!g_fxo->get<loaded_npdrm_keys>().npdrm_fds.try_inc(16))
+			{
+				return nullptr;
+			}
+
+			return std::make_shared<lv2_file>(result.ppath, std::move(result.file), 0,  0, std::move(result.real_path), lv2_file_type::sdata);
+		}))
+		{
+			arg->out_code = CELL_OK;
+			arg->fd = id;
+			return CELL_OK;
+		}
+
+		// Out of file descriptors
+		return CELL_EMFILE;
 	}
 	}
 
@@ -2240,12 +2338,59 @@ error_code sys_fs_get_mount_info_size(ppu_thread&, vm::ptr<u64> len)
 {
 	sys_fs.todo("sys_fs_get_mount_info_size(len=*0x%x)", len);
 
+	if (!len)
+	{
+		return CELL_EFAULT;
+	}
+
+	*len = 0x8;
+
 	return CELL_OK;
 }
 
 error_code sys_fs_get_mount_info(ppu_thread&, vm::ptr<CellFsMountInfo> info, u32 len, vm::ptr<u64> out_len)
 {
 	sys_fs.todo("sys_fs_get_mount_info(info=*0x%x, len=0x%x, out_len=*0x%x)", info, len, out_len);
+
+	if (!out_len)
+	{
+		return CELL_EFAULT;
+	}
+
+	// TODO there is a case where 'something' happens if !info or len == 0
+	if (!info || len == 0)
+	{
+		sys_fs.todo("sys_fs_get_mount_info special case TODO");
+	}
+
+	const u32 max_len = std::min<u32>(len, 8);
+	*out_len = max_len;
+
+	struct mount_info
+	{
+		std::string_view path, filesystem, dev_name;
+		be_t<u32> unk1 = 0, unk2 = 0, unk3 = 0, unk4 = 0, unk5 = 0;
+	};
+
+	static constexpr std::array<mount_info, 8> data
+	{
+		mount_info{.path = "/", .filesystem = "CELL_FS_ADMINFS", .dev_name = "CELL_FS_ADMINFS:", .unk5 = 0x10000000},
+		mount_info{.path = "/app_home", .filesystem = "CELL_FS_DUMMY", .dev_name = "CELL_FS_DUMMY:"},
+		mount_info{.path = "/host_root", .filesystem = "CELL_FS_DUMMY", .dev_name = "CELL_FS_DUMMY:"},
+		mount_info{.path = "/dev_flash", .filesystem = "CELL_FS_FAT", .dev_name = "CELL_FS_IOS:BUILTIN_FLSH1:", .unk5 = 0x10000000},
+		mount_info{.path = "/dev_flash2", .filesystem = "CELL_FS_FAT", .dev_name = "CELL_FS_IOS:BUILTIN_FLSH2:"},
+		mount_info{.path = "/dev_flash3", .filesystem = "CELL_FS_FAT", .dev_name = "CELL_FS_IOS:BUILTIN_FLSH3:"},
+		mount_info{.path = "/dev_hdd0", .filesystem = "CELL_FS_UFS", .dev_name = "CELL_FS_UTILITY:HDD0:"},
+		mount_info{.path = "/dev_bdvd", .filesystem = "CELL_FS_ISO9660", .dev_name = "CELL_FS_IOS:PATA0_BDVD_DRIVE"},
+	};
+
+	for (u32 i = 0; i < max_len; info++, i++)
+	{
+		strcpy_trunc(info->mount_path, data[i].path);
+		strcpy_trunc(info->filesystem, data[i].filesystem);
+		strcpy_trunc(info->dev_name, data[i].dev_name);
+		std::memcpy(&info->unk1, &data[i].unk1, sizeof(be_t<u32>) * 5);
+	}
 
 	return CELL_OK;
 }

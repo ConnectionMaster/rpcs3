@@ -1,6 +1,7 @@
 #pragma once
 
 #include "overlays.h"
+#include "overlay_edit_text.hpp"
 #include "overlay_osk_panel.h"
 #include "Emu/Cell/Modules/cellOskDialog.h"
 
@@ -73,12 +74,12 @@ namespace rsx
 			compiled_resource m_cached_resource;
 
 			u32 flags = 0;
-			u32 char_limit = UINT32_MAX;
+			u32 char_limit = umax;
 
 			std::vector<osk_panel> m_panels;
 			usz m_panel_index = 0;
 
-			osk_dialog() = default;
+			osk_dialog();
 			~osk_dialog() override = default;
 
 			void Create(const std::string& title, const std::u16string& message, char16_t* init_text, u32 charlimit, u32 prohibit_flags, u32 panel_flag, u32 first_view_panel) override;
@@ -104,7 +105,7 @@ namespace rsx
 			void on_backspace(const std::u32string&);
 			void on_enter(const std::u32string&);
 
-			std::u32string get_placeholder();
+			std::u32string get_placeholder() const;
 
 			std::pair<u32, u32> get_cell_geometry(u32 index);
 

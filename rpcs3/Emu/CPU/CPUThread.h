@@ -5,6 +5,10 @@
 
 #include <vector>
 
+template <typename Derived, typename Base>
+concept DerivedFrom = std::is_base_of_v<Base, Derived> &&
+	std::is_convertible_v<const volatile Derived*, const volatile Base*>;
+
 // Thread state flags
 enum class cpu_flag : u32
 {
@@ -34,7 +38,7 @@ constexpr bool is_stopped(bs_t<cpu_flag> state)
 // Test paused state
 constexpr bool is_paused(bs_t<cpu_flag> state)
 {
-	return !!(state & (cpu_flag::suspend + cpu_flag::dbg_global_pause + cpu_flag::dbg_pause));
+	return !!(state & (cpu_flag::suspend + cpu_flag::dbg_global_pause + cpu_flag::dbg_pause)) && !is_stopped(state);
 }
 
 class cpu_thread
@@ -46,6 +50,9 @@ protected:
 	cpu_thread(u32 id);
 
 public:
+	cpu_thread(const cpu_thread&) = delete;
+	cpu_thread& operator=(const cpu_thread&) = delete;
+
 	virtual ~cpu_thread();
 	void operator()();
 
@@ -104,13 +111,35 @@ public:
 		return id >> 24;
 	}
 
+	template <DerivedFrom<cpu_thread> T>
+	T* try_get()
+	{
+		if constexpr (std::is_same_v<std::remove_const_t<T>, cpu_thread>)
+		{
+			return this;
+		}
+		else
+		{
+			if (id_type() == (T::id_base >> 24))
+			{
+				return static_cast<T*>(this);
+			}
+
+			return nullptr;
+		}
+	}
+
+	template <DerivedFrom<cpu_thread> T>
+	const T* try_get() const
+	{
+		return const_cast<cpu_thread*>(this)->try_get<const T>();
+	}
+
 	u32 get_pc() const;
 	u32* get_pc2(); // Last PC before stepping for the debugger (may be null)
 
 	void notify();
-
-private:
-	void abort();
+	cpu_thread& operator=(thread_state);
 
 public:
 	// Thread stats for external observation
@@ -144,7 +173,7 @@ public:
 	virtual void cpu_return() {}
 
 	// Callback for thread_ctrl::wait or RSX wait
-	virtual void cpu_wait(bs_t<cpu_flag> flags);
+	virtual void cpu_wait(bs_t<cpu_flag> old);
 
 	// Callback for function abortion stats on Emu.Stop()
 	virtual void cpu_on_stop() {}
@@ -172,9 +201,6 @@ public:
 
 		// Internal method
 		bool push(cpu_thread* _this) noexcept;
-
-		// Called after suspend_post
-		void post() noexcept;
 	};
 
 	// Suspend all threads and execute op (may be executed by other thread than caller!)
@@ -238,21 +264,31 @@ public:
 		}
 	}
 
-	// Stop all threads with cpu_flag::exit
-	static void stop_all() noexcept;
+	// Cleanup thread counting information
+	static void cleanup() noexcept;
 
 	// Send signal to the profiler(s) to flush results
 	static void flush_profilers() noexcept;
 
+	template <DerivedFrom<cpu_thread> T = cpu_thread>
+	static inline T* get_current() noexcept
+	{
+		if (const auto cpu = g_tls_this_thread)
+		{
+			return cpu->try_get<T>();
+		}
+
+		return nullptr;
+	}
+
 private:
 	static thread_local cpu_thread* g_tls_this_thread;
-
-	friend cpu_thread* get_current_cpu_thread() noexcept;
 };
 
-inline cpu_thread* get_current_cpu_thread() noexcept
+template <DerivedFrom<cpu_thread> T = cpu_thread>
+inline T* get_current_cpu_thread() noexcept
 {
-	return cpu_thread::g_tls_this_thread;
+	return cpu_thread::get_current<T>();
 }
 
 class ppu_thread;

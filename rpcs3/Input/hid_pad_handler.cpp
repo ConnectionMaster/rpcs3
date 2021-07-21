@@ -53,7 +53,7 @@ bool hid_pad_handler<Device>::Init()
 	if (res != 0)
 		fmt::throw_exception("%s hidapi-init error.threadproc", m_type);
 
-	for (size_t i = 1; i <= MAX_GAMEPADS; i++) // Controllers 1-n in GUI
+	for (usz i = 1; i <= MAX_GAMEPADS; i++) // Controllers 1-n in GUI
 	{
 		m_controllers.emplace(m_name_string + std::to_string(i), std::make_shared<Device>());
 	}
@@ -167,7 +167,7 @@ void hid_pad_handler<Device>::enumerate_devices()
 	}
 	else
 	{
-		const size_t count = std::count_if(m_controllers.cbegin(), m_controllers.cend(), [](const auto& c) { return c.second && c.second->hidDevice; });
+		const usz count = std::count_if(m_controllers.cbegin(), m_controllers.cend(), [](const auto& c) { return c.second && c.second->hidDevice; });
 		if (count > 0)
 		{
 			hid_log.success("%s Controllers found: %d", m_type, count);
@@ -204,7 +204,7 @@ std::shared_ptr<PadDevice> hid_pad_handler<Device>::get_device(const std::string
 }
 
 template <class Device>
-u32 hid_pad_handler<Device>::get_battery_color(u8 battery_level, int brightness) const
+u32 hid_pad_handler<Device>::get_battery_color(u8 battery_level, int brightness)
 {
 	static const std::array<u32, 12> battery_level_clr = {0xff00, 0xff33, 0xff66, 0xff99, 0xffcc, 0xffff, 0xccff, 0x99ff, 0x66ff, 0x33ff, 0x00ff, 0x00ff};
 

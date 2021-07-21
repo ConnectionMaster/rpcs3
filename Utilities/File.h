@@ -1,6 +1,7 @@
 #pragma once // No BOM and only basic ASCII in this header, or a neko will die
 
 #include "util/types.hpp"
+#include "util/shared_ptr.hpp"
 #include "bit_set.h"
 
 #include <memory>
@@ -81,7 +82,7 @@ namespace fs
 	{
 		virtual ~file_base();
 
-		virtual stat_t stat();
+		[[noreturn]] virtual stat_t stat();
 		virtual void sync();
 		virtual bool trunc(u64 length) = 0;
 		virtual u64 read(void* buffer, u64 size) = 0;
@@ -95,7 +96,7 @@ namespace fs
 	// Directory entry (TODO)
 	struct dir_entry : stat_t
 	{
-		std::string name;
+		std::string name{};
 
 		dir_entry()
 			: stat_t{}
@@ -124,16 +125,19 @@ namespace fs
 	// Virtual device
 	struct device_base
 	{
+		const std::string fs_prefix;
+
+		device_base();
 		virtual ~device_base();
 
 		virtual bool stat(const std::string& path, stat_t& info) = 0;
 		virtual bool statfs(const std::string& path, device_stat& info) = 0;
-		virtual bool remove_dir(const std::string& path) = 0;
-		virtual bool create_dir(const std::string& path) = 0;
-		virtual bool rename(const std::string& from, const std::string& to) = 0;
-		virtual bool remove(const std::string& path) = 0;
-		virtual bool trunc(const std::string& path, u64 length) = 0;
-		virtual bool utime(const std::string& path, s64 atime, s64 mtime) = 0;
+		virtual bool remove_dir(const std::string& path);
+		virtual bool create_dir(const std::string& path);
+		virtual bool rename(const std::string& from, const std::string& to);
+		virtual bool remove(const std::string& path);
+		virtual bool trunc(const std::string& path, u64 length);
+		virtual bool utime(const std::string& path, s64 atime, s64 mtime);
 
 		virtual std::unique_ptr<file_base> open(const std::string& path, bs_t<open_mode> mode) = 0;
 		virtual std::unique_ptr<dir_base> open_dir(const std::string& path) = 0;
@@ -146,10 +150,10 @@ namespace fs
 	constexpr struct pod_tag_t{} pod_tag;
 
 	// Get virtual device for specified path (nullptr for real path)
-	std::shared_ptr<device_base> get_virtual_device(const std::string& path);
+	shared_ptr<device_base> get_virtual_device(const std::string& path);
 
 	// Set virtual device with specified name (nullptr for deletion)
-	std::shared_ptr<device_base> set_virtual_device(const std::string& root_name, const std::shared_ptr<device_base>&);
+	shared_ptr<device_base> set_virtual_device(const std::string& name, shared_ptr<device_base> device);
 
 	// Try to get parent directory (returns empty string on failure)
 	std::string get_parent_dir(const std::string& path);
@@ -198,7 +202,7 @@ namespace fs
 
 	class file final
 	{
-		std::unique_ptr<file_base> m_file;
+		std::unique_ptr<file_base> m_file{};
 
 		bool strict_read_check(u64 size, u64 type_size) const;
 
@@ -216,6 +220,7 @@ namespace fs
 		template <typename... Args>
 		bool open(Args&&... args)
 		{
+			m_file.reset();
 			*this = fs::file(std::forward<Args>(args)...);
 			return m_file.operator bool();
 		}
@@ -501,7 +506,7 @@ namespace fs
 
 	class dir final
 	{
-		std::unique_ptr<dir_base> m_dir;
+		std::unique_ptr<dir_base> m_dir{};
 
 	public:
 		dir() = default;
@@ -562,7 +567,7 @@ namespace fs
 		class iterator
 		{
 			const dir* m_parent;
-			dir_entry m_entry;
+			dir_entry m_entry{};
 
 		public:
 			enum class mode
@@ -589,6 +594,14 @@ namespace fs
 					m_parent = nullptr;
 				}
 			}
+
+			iterator(const iterator&) = default;
+
+			iterator(iterator&&) = default;
+
+			iterator& operator=(const iterator&) = default;
+
+			iterator& operator=(iterator&&) = default;
 
 			dir_entry& operator *()
 			{
@@ -624,24 +637,26 @@ namespace fs
 	// Get common cache directory
 	const std::string& get_cache_dir();
 
+	// Temporary directory
+	const std::string& get_temp_dir();
+
 	// Unique pending file creation destined to be renamed to the destination file
 	struct pending_file
 	{
-		fs::file file;
+		fs::file file{};
 
 		// This is meant to modify files atomically, overwriting is likely
 		bool commit(bool overwrite = true);
 
 		pending_file(const std::string& path);
+		pending_file(const pending_file&) = delete;
+		pending_file& operator=(const pending_file&) = delete;
 		~pending_file();
 
 	private:
-		std::string m_path; // Pending file path
-		std::string m_dest; // Destination file path
+		std::string m_path{}; // Pending file path
+		std::string m_dest{}; // Destination file path
 	};
-
-	// Get real path for comparisons (TODO: investigate std::filesystem::path::compare implementation)
-	std::string escape_path(std::string_view path);
 
 	// Delete directory and all its contents recursively
 	bool remove_all(const std::string& path, bool remove_root = true);

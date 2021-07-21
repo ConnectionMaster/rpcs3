@@ -9,8 +9,6 @@
 
 LOG_CHANNEL(sys_semaphore);
 
-template<> DECLARE(ipc_manager<lv2_sema, u64>::g_ipc) {};
-
 error_code sys_semaphore_create(ppu_thread& ppu, vm::ptr<u32> sem_id, vm::ptr<sys_semaphore_attribute_t> attr, s32 initial_val, s32 max_val)
 {
 	ppu.state += cpu_flag::wait;
@@ -38,9 +36,11 @@ error_code sys_semaphore_create(ppu_thread& ppu, vm::ptr<u32> sem_id, vm::ptr<sy
 		return CELL_EINVAL;
 	}
 
-	if (auto error = lv2_obj::create<lv2_sema>(_attr.pshared, _attr.ipc_key, _attr.flags, [&]
+	const u64 ipc_key = lv2_obj::get_key(_attr);
+
+	if (auto error = lv2_obj::create<lv2_sema>(_attr.pshared, ipc_key, _attr.flags, [&]
 	{
-		return std::make_shared<lv2_sema>(protocol, _attr.pshared, _attr.ipc_key, _attr.flags, _attr.name_u64, max_val, initial_val);
+		return std::make_shared<lv2_sema>(protocol, ipc_key, _attr.name_u64, max_val, initial_val);
 	}))
 	{
 		return error;
@@ -68,6 +68,7 @@ error_code sys_semaphore_destroy(ppu_thread& ppu, u32 sem_id)
 			return CELL_EBUSY;
 		}
 
+		lv2_obj::on_id_destroy(sema, sema.key);
 		return {};
 	});
 

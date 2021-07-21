@@ -317,7 +317,7 @@ namespace rsx
 
 				out.push_back
 				({
-					section.surface->get_surface(rsx::surface_access::read),
+					section.surface->get_surface(rsx::surface_access::shader_read),
 					surface_transform::identity,
 					0,
 					static_cast<u16>(src_x),
@@ -529,12 +529,19 @@ namespace rsx
 			if (const bool gcm_format_is_depth = is_gcm_depth_format(attr2.gcm_format);
 				gcm_format_is_depth != is_depth)
 			{
-				if (force_convert)
+				if (force_convert || gcm_format_is_depth)
 				{
+					// If force_convert is set, we already know there is no simple workaround. Bitcast will be forced to resolve the issue.
+					// If the existing texture is a color texture but depth readout is requested, force bitcast
+					// Note that if only reading the depth value was needed from a depth surface, it would have been sampled as color due to Z comparison.
 					is_depth = gcm_format_is_depth;
+					force_convert = true;
 				}
 				else
 				{
+					// Existing texture is a depth texture, but RSX wants a color texture.
+					// Change the RSX request to a compatible depth texture to give same results in shader.
+					ensure(is_depth);
 					attr2.gcm_format = get_compatible_depth_format(attr2.gcm_format);
 				}
 
@@ -558,7 +565,7 @@ namespace rsx
 					const auto format_class = (force_convert) ? classify_format(attr2.gcm_format) : texptr->format_class();
 					const auto command = surface_is_rop_target ? deferred_request_command::copy_image_dynamic : deferred_request_command::copy_image_static;
 
-					return { texptr->get_surface(rsx::surface_access::read), command, attr2, {},
+					return { texptr->get_surface(rsx::surface_access::shader_read), command, attr2, {},
 							texture_upload_context::framebuffer_storage, format_class, scale,
 							extended_dimension, decoded_remap };
 				}
@@ -569,7 +576,7 @@ namespace rsx
 
 			if (extended_dimension == rsx::texture_dimension_extended::texture_dimension_3d)
 			{
-				return{ texptr->get_surface(rsx::surface_access::read), deferred_request_command::_3d_unwrap,
+				return{ texptr->get_surface(rsx::surface_access::shader_read), deferred_request_command::_3d_unwrap,
 						attr2, {},
 						texture_upload_context::framebuffer_storage, texptr->format_class(), scale,
 						rsx::texture_dimension_extended::texture_dimension_3d, decoded_remap };
@@ -577,7 +584,7 @@ namespace rsx
 
 			ensure(extended_dimension == rsx::texture_dimension_extended::texture_dimension_cubemap);
 
-			return{ texptr->get_surface(rsx::surface_access::read), deferred_request_command::cubemap_unwrap,
+			return{ texptr->get_surface(rsx::surface_access::shader_read), deferred_request_command::cubemap_unwrap,
 					attr2, {},
 					texture_upload_context::framebuffer_storage, texptr->format_class(), scale,
 					rsx::texture_dimension_extended::texture_dimension_cubemap, decoded_remap };

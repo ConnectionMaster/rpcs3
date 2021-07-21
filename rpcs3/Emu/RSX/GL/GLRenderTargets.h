@@ -47,11 +47,9 @@ namespace gl
 {
 	class render_target : public viewable_image, public rsx::ref_counted, public rsx::render_target_descriptor<texture*>
 	{
-		u16 surface_pixel_size = 0;
-
 		void clear_memory(gl::command_context& cmd);
 		void load_memory(gl::command_context& cmd);
-		void initialize_memory(gl::command_context& cmd, bool read_access);
+		void initialize_memory(gl::command_context& cmd, rsx::surface_access access);
 
 	public:
 		render_target(GLuint width, GLuint height, GLenum sized_format, rsx::format_class format_class)
@@ -113,8 +111,8 @@ namespace gl
 		}
 
 		void memory_barrier(gl::command_context& cmd, rsx::surface_access access);
-		void read_barrier(gl::command_context& cmd) { memory_barrier(cmd, rsx::surface_access::read); }
-		void write_barrier(gl::command_context& cmd) { memory_barrier(cmd, rsx::surface_access::write); }
+		void read_barrier(gl::command_context& cmd) { memory_barrier(cmd, rsx::surface_access::shader_read); }
+		void write_barrier(gl::command_context& cmd) { memory_barrier(cmd, rsx::surface_access::shader_write); }
 	};
 
 	struct framebuffer_holder : public gl::fbo, public rsx::ref_counted

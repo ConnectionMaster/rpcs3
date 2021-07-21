@@ -6,6 +6,7 @@
 #include "Utilities/StrUtil.h"
 #include "Utilities/File.h"
 #include "Emu/System.h"
+#include "Emu/system_utils.hpp"
 #include "util/logs.hpp"
 
 #include <QApplication>
@@ -23,10 +24,8 @@
 #include <CpuArch.h>
 #include <7z.h>
 #include <7zAlloc.h>
-#include <7zBuf.h>
 #include <7zCrc.h>
 #include <7zFile.h>
-#include <7zVersion.h>
 
 #define PATH_MAX MAX_PATH
 
@@ -36,10 +35,6 @@
 #endif
 
 LOG_CHANNEL(update_log, "UPDATER");
-
-update_manager::update_manager()
-{
-}
 
 void update_manager::check_for_updates(bool automatic, bool check_only, QWidget* parent)
 {
@@ -174,7 +169,7 @@ bool update_manager::handle_json(bool automatic, bool check_only, const QByteArr
 
 	update_log.notice("Current: %s, latest: %s, difference: %lld ms", cur_str.toStdString(), lts_str.toStdString(), diff_msec);
 
-	Localized localized;
+	const Localized localized;
 
 	if (hash_found)
 	{
@@ -232,7 +227,7 @@ void update_manager::update()
 	ensure(m_downloader);
 
 	if (m_update_message.isEmpty() ||
-		QMessageBox::question(m_downloader->get_progress_dialog(), tr("Update Available"), m_update_message, QMessageBox::Yes | QMessageBox::No) == QMessageBox::No)
+		QMessageBox::question(m_downloader->get_progress_dialog() ? m_downloader->get_progress_dialog() : m_parent, tr("Update Available"), m_update_message, QMessageBox::Yes | QMessageBox::No) == QMessageBox::No)
 	{
 		m_downloader->close_progress_dialog();
 		return;
@@ -274,7 +269,7 @@ bool update_manager::handle_rpcs3(const QByteArray& data)
 {
 	m_downloader->update_progress_dialog(tr("Updating RPCS3"));
 
-	if (m_expected_size != data.size() + 0u)
+	if (m_expected_size != static_cast<u64>(data.size()))
 	{
 		update_log.error("Download size mismatch: %d expected: %d", data.size(), m_expected_size);
 		return false;
@@ -290,7 +285,7 @@ bool update_manager::handle_rpcs3(const QByteArray& data)
 #ifdef _WIN32
 
 	// Get executable path
-	const std::string orig_path = Emulator::GetExeDir() + "rpcs3.exe";
+	const std::string orig_path = rpcs3::utils::get_exe_dir() + "rpcs3.exe";
 
 	std::wstring wchar_orig_path;
 	const auto tmp_size = MultiByteToWideChar(CP_UTF8, 0, orig_path.c_str(), -1, nullptr, 0);
@@ -311,7 +306,7 @@ bool update_manager::handle_rpcs3(const QByteArray& data)
 		update_log.error("Failed to create temporary file: %s", tmpfile_path);
 		return false;
 	}
-	if (tmpfile.write(data.data(), data.size()) != data.size())
+	if (tmpfile.write(data.data(), data.size()) != static_cast<u64>(data.size()))
 	{
 		update_log.error("Failed to write temporary file: %s", tmpfile_path);
 		return false;
@@ -347,14 +342,14 @@ bool update_manager::handle_rpcs3(const QByteArray& data)
 
 	res = SZ_OK;
 	{
-		lookStream.buf = (Byte*)ISzAlloc_Alloc(&allocImp, kInputBufSize);
+		lookStream.buf = static_cast<Byte*>(ISzAlloc_Alloc(&allocImp, kInputBufSize));
 		if (!lookStream.buf)
 			res = SZ_ERROR_MEM;
 		else
 		{
 			lookStream.bufSize    = kInputBufSize;
 			lookStream.realStream = &archiveStream.vt;
-			LookToRead2_Init(&lookStream);
+			LookToRead2_Init(&lookStream)
 		}
 	}
 
@@ -396,7 +391,7 @@ bool update_manager::handle_rpcs3(const QByteArray& data)
 	usz outBufferSize = 0;
 
 	// Creates temp folder for moving active files
-	const std::string tmp_folder = Emulator::GetEmuDir() + "rpcs3_old/";
+	const std::string tmp_folder = rpcs3::utils::get_emu_dir() + "rpcs3_old/";
 	fs::create_dir(tmp_folder);
 
 	for (UInt32 i = 0; i < db.NumFiles; i++)
@@ -429,9 +424,7 @@ bool update_manager::handle_rpcs3(const QByteArray& data)
 			temp_u8[index] = static_cast<u8>(temp_u16[index]);
 		}
 		temp_u8[len] = 0;
-		std::string name((char*)temp_u8);
-
-		name = Emulator::GetEmuDir() + name;
+		const std::string name = rpcs3::utils::get_emu_dir() + std::string(reinterpret_cast<char*>(temp_u8));
 
 		if (!isDir)
 		{

@@ -7,7 +7,6 @@
 #include "cellAudio.h"
 
 #include "emmintrin.h"
-#include "immintrin.h"
 #include <cmath>
 
 LOG_CHANNEL(cellAudio);
@@ -65,7 +64,7 @@ void cell_audio_config::reset()
 
 	desired_buffer_duration = raw.desired_buffer_duration * 1000llu;
 
-	buffering_enabled = raw.buffering_enabled && backend->has_capability(AudioBackend::PLAY_PAUSE_FLUSH | AudioBackend::IS_PLAYING);;
+	buffering_enabled = raw.buffering_enabled && backend->has_capability(AudioBackend::PLAY_PAUSE_FLUSH | AudioBackend::IS_PLAYING);
 
 	minimum_block_period = audio_block_period / 2;
 	maximum_block_period = (6 * audio_block_period) / 5;
@@ -160,7 +159,7 @@ f32 audio_ringbuffer::set_frequency_ratio(f32 new_ratio)
 	return frequency_ratio;
 }
 
-u64 audio_ringbuffer::get_timestamp() const
+u64 audio_ringbuffer::get_timestamp()
 {
 	return get_system_time() - Emu.GetPauseTime();
 }
@@ -362,7 +361,7 @@ void audio_port::tag(s32 offset)
 		last_tag_value[tag_nr] = -0.0f;
 	}
 
-	prev_touched_tag_nr = UINT32_MAX;
+	prev_touched_tag_nr = -1;
 }
 
 std::tuple<u32, u32, u32, u32> cell_audio_thread::count_port_buffer_tags()
@@ -396,13 +395,13 @@ std::tuple<u32, u32, u32, u32> cell_audio_thread::count_port_buffer_tags()
 			{
 				last_val = val;
 
-				retouched |= (tag_nr <= port.prev_touched_tag_nr) && port.prev_touched_tag_nr != UINT32_MAX;
+				retouched |= (tag_nr <= port.prev_touched_tag_nr) && port.prev_touched_tag_nr != umax;
 				last_touched_tag_nr = tag_nr;
 			}
 		}
 
 		// Decide whether the buffer is untouched, in progress, incomplete, or complete
-		if (last_touched_tag_nr == UINT32_MAX)
+		if (last_touched_tag_nr == umax)
 		{
 			// no tag has been touched yet
 			untouched++;
@@ -506,7 +505,7 @@ void cell_audio_thread::advance(u64 timestamp, bool reset)
 			continue;
 		}
 
-		if ((queues[queue_count] = key_inf.port.lock()))
+		if ((queues[queue_count] = key_inf.port))
 		{
 			u32 periods = 1;
 
@@ -1571,14 +1570,12 @@ error_code AudioSetNotifyEventQueue(u64 key, u32 iFlags)
 
 	for (auto i = g_audio.keys.cbegin(); i != g_audio.keys.cend();) // check for duplicates
 	{
-		auto port = i->port.lock();
-
-		if (port == q)
+		if (i->port == q)
 		{
 			return CELL_AUDIO_ERROR_TRANS_EVENT;
 		}
 
-		if (!lv2_event_queue::check(port))
+		if (!lv2_obj::check(i->port))
 		{
 			// Cleanup, avoid cases where there are multiple ports with the same key
 			i = g_audio.keys.erase(i);
@@ -1628,7 +1625,7 @@ error_code AudioRemoveNotifyEventQueue(u64 key, u32 iFlags)
 
 	for (auto i = g_audio.keys.cbegin(); i != g_audio.keys.cend(); i++)
 	{
-		if ([&](auto port){ return lv2_event_queue::check(port) && port->key == key; }(i->port.lock()))
+		if (lv2_obj::check(i->port) && i->port->key == key)
 		{
 			if (i->flags != iFlags)
 			{

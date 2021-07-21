@@ -15,7 +15,7 @@ namespace rsx
 			m_iotable = &pctrl->iomap_table;
 		}
 
-		void FIFO_control::sync_get()
+		void FIFO_control::sync_get() const
 		{
 			m_ctrl->get.release(m_internal_get);
 		}
@@ -38,7 +38,7 @@ namespace rsx
 		}
 
 		template <bool full>
-		inline u32 FIFO_control::read_put()
+		inline u32 FIFO_control::read_put() const
 		{
 			if constexpr (!full)
 			{
@@ -558,7 +558,7 @@ namespace rsx
 							if (reg >= range.first && reg < range.first + range.second)
 							{
 								const u32 remaining = std::min<u32>(fifo_ctrl->get_remaining_args_count() + 1,
-									(fifo_ctrl->last_cmd() & RSX_METHOD_NON_INCREMENT_CMD_MASK) ? UINT32_MAX : (range.first + range.second) - reg);
+									(fifo_ctrl->last_cmd() & RSX_METHOD_NON_INCREMENT_CMD_MASK) ? -1 : (range.first + range.second) - reg);
 
 								commands.back().rsx_command.first = (fifo_ctrl->last_cmd() & RSX_METHOD_NON_INCREMENT_CMD_MASK) | (reg << 2) | (remaining << 18);
 

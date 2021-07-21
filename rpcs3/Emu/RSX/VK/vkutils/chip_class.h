@@ -16,7 +16,6 @@ namespace vk
 		AMD_navi2x,
 		NV_generic,
 		NV_kepler,
-		NV_mobile_kepler,
 		NV_maxwell,
 		NV_pascal,
 		NV_volta,
@@ -32,6 +31,8 @@ namespace vk
 		RADV,
 		INTEL
 	};
+
+	driver_vendor get_driver_vendor();
 
 	struct chip_family_table
 	{

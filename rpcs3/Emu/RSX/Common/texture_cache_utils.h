@@ -1,9 +1,11 @@
 #pragma once
 
-#include "../rsx_cache.h"
 #include "texture_cache_types.h"
 #include "texture_cache_predictor.h"
 #include "TextureUtils.h"
+
+#include "Emu/Memory/vm.h"
+#include "util/vm.hpp"
 
 #include <list>
 #include <unordered_set>
@@ -47,8 +49,8 @@ namespace rsx
 
 	public:
 		using value_type = section_storage_type;
-		using array_type = typename std::array<value_type, array_size>;
-		using list_type = typename std::list<array_type>;
+		using array_type = std::array<value_type, array_size>;
+		using list_type = std::list<array_type>;
 		using size_type = u32;
 
 		// Iterator
@@ -71,14 +73,14 @@ namespace rsx
 				idx(0)
 			{
 				if (_block->empty())
-					idx = UINT32_MAX;
+					idx = u32{umax};
 			}
 
 		private:
 			// Members
 			block_list *block;
 			list_iterator list_it = {};
-			size_type idx = UINT32_MAX;
+			size_type idx = u32{umax};
 			size_type array_idx = 0;
 
 			inline void next()
@@ -86,7 +88,7 @@ namespace rsx
 				++idx;
 				if (idx >= block->size())
 				{
-					idx = UINT32_MAX;
+					idx = u32{umax};
 					return;
 				}
 
@@ -104,7 +106,6 @@ namespace rsx
 			inline reference operator++() { next(); return **this; }
 			inline reference operator++(int) { auto &res = **this;  next(); return res; }
 			inline bool operator==(const iterator_tmpl &rhs) const { return idx == rhs.idx; }
-			inline bool operator!=(const iterator_tmpl &rhs) const { return idx != rhs.idx; }
 		};
 
 		using iterator = iterator_tmpl<value_type, ranged_storage_block_list, typename list_type::iterator>;
@@ -133,7 +134,8 @@ namespace rsx
 		// Constructor, Destructor
 		ranged_storage_block_list() :
 			m_data_it(m_data.end()),
-			m_array_idx(UINT32_MAX)
+			m_array_idx(-1),
+			m_capacity(0)
 		{}
 
 		// Iterator
@@ -554,36 +556,29 @@ namespace rsx
 
 		void purge_unreleased_sections()
 		{
-			// We will be iterating through m_in_use
-			// do not allow the callbacks to touch m_in_use to avoid invalidating the iterator
 			m_purging = true;
+			std::vector<section_storage_type*> textures_to_remove;
 
-			//Reclaims all graphics memory consumed by dirty textures
-			for (auto it = m_in_use.begin(); it != m_in_use.end();)
+			// Reclaims all graphics memory consumed by dirty textures
+			// Do not destroy anything while iterating or you will end up with stale iterators
+			for (auto& block : m_in_use)
 			{
-				auto *block = *it;
-
 				if (block->get_unreleased_count() > 0)
 				{
-					for (auto &tex : *block)
+					for (auto& tex : *block)
 					{
 						if (!tex.is_unreleased())
 							continue;
 
 						ensure(!tex.is_locked());
-
-						tex.destroy();
+						textures_to_remove.push_back(&tex);
 					}
 				}
+			}
 
-				if (block->get_exists_count() == 0)
-				{
-					it = m_in_use.erase(it);
-				}
-				else
-				{
-					it++;
-				}
+			for (auto& tex : textures_to_remove)
+			{
+				tex->destroy();
 			}
 
 			m_purging = false;
@@ -593,11 +588,11 @@ namespace rsx
 		bool purge_unlocked_sections()
 		{
 			// Reclaims all graphics memory consumed by unlocked textures
-			bool any_released = false;
-			for (auto it = m_in_use.begin(); it != m_in_use.end();)
-			{
-				auto* block = *it;
+			// Do not destroy anything while iterating or you will end up with stale iterators
+			std::vector<section_storage_type*> textures_to_remove;
 
+			for (auto& block : m_in_use)
+			{
 				if (block->get_exists_count() > block->get_locked_count())
 				{
 					for (auto& tex : *block)
@@ -610,22 +605,17 @@ namespace rsx
 						}
 
 						ensure(!tex.is_locked() && tex.exists());
-						tex.destroy();
-						any_released = true;
+						textures_to_remove.push_back(&tex);
 					}
-				}
-
-				if (block->get_exists_count() == 0)
-				{
-					it = m_in_use.erase(it);
-				}
-				else
-				{
-					it++;
 				}
 			}
 
-			return any_released;
+			for (auto& tex : textures_to_remove)
+			{
+				tex->destroy();
+			}
+
+			return !textures_to_remove.empty();
 		}
 
 		void trim_sections()
@@ -816,7 +806,6 @@ namespace rsx
 			inline reference operator++() { next(); return *obj; }
 			inline reference operator++(int) { auto *ptr = obj; next(); return *ptr; }
 			inline bool operator==(const range_iterator_tmpl &rhs) const { return obj == rhs.obj && unowned_remaining == rhs.unowned_remaining; }
-			inline bool operator!=(const range_iterator_tmpl &rhs) const { return !operator==(rhs); }
 
 			inline void set_end(u32 new_end)
 			{
@@ -927,7 +916,7 @@ namespace rsx
 		void protect(utils::protection new_prot, bool force = false);
 		void protect(utils::protection prot, const std::pair<u32, u32>& new_confirm);
 		void unprotect();
-		bool sync();
+		bool sync() const;
 
 		void discard();
 		const address_range& get_bounds(section_bounds bounds) const;
@@ -1103,7 +1092,7 @@ namespace rsx
 		bool speculatively_flushed = false;
 
 		rsx::memory_read_flags readback_behaviour = rsx::memory_read_flags::flush_once;
-		rsx::texture_create_flags view_flags = rsx::texture_create_flags::default_component_order;
+		rsx::component_order view_flags = rsx::component_order::default_;
 		rsx::texture_upload_context context = rsx::texture_upload_context::shader_read;
 		rsx::texture_dimension_extended image_type = rsx::texture_dimension_extended::texture_dimension_2d;
 
@@ -1178,7 +1167,7 @@ namespace rsx
 			m_predictor_entry = nullptr;
 
 			readback_behaviour = rsx::memory_read_flags::flush_once;
-			view_flags = rsx::texture_create_flags::default_component_order;
+			view_flags = rsx::component_order::default_;
 			context = rsx::texture_upload_context::shader_read;
 			image_type = rsx::texture_dimension_extended::texture_dimension_2d;
 
@@ -1653,7 +1642,7 @@ namespace rsx
 			return *m_predictor_entry;
 		}
 
-		void set_view_flags(rsx::texture_create_flags flags)
+		void set_view_flags(rsx::component_order flags)
 		{
 			view_flags = flags;
 		}
@@ -1715,7 +1704,7 @@ namespace rsx
 			return rsx_pitch;
 		}
 
-		rsx::texture_create_flags get_view_flags() const
+		rsx::component_order get_view_flags() const
 		{
 			return view_flags;
 		}

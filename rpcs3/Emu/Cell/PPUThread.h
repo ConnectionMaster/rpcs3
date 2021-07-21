@@ -34,6 +34,18 @@ enum class ppu_join_status : u32
 	max = 4, // Values above it indicate PPU id of joining thread
 };
 
+enum ppu_thread_status : u32
+{
+	PPU_THREAD_STATUS_IDLE,
+	PPU_THREAD_STATUS_RUNNABLE,
+	PPU_THREAD_STATUS_ONPROC,
+	PPU_THREAD_STATUS_SLEEP,
+	PPU_THREAD_STATUS_STOP,
+	PPU_THREAD_STATUS_ZOMBIE,
+	PPU_THREAD_STATUS_DELETED,
+	PPU_THREAD_STATUS_UNKNOWN,
+};
+
 // Formatting helper
 enum class ppu_syscall_code : u64
 {
@@ -74,7 +86,7 @@ struct cmd64
 		u32 arg2;
 	};
 
-	template <typename T, typename T2 = simple_t<T>>
+	template <typename T, typename T2 = std::common_type_t<T>>
 	cmd64(const T& value)
 		: m_data(std::bit_cast<u64, T2>(value))
 	{
@@ -122,12 +134,18 @@ public:
 	virtual std::string dump_callstack() const override;
 	virtual std::vector<std::pair<u32, u32>> dump_callstack_list() const override;
 	virtual std::string dump_misc() const override;
+	virtual std::string dump_all() const override;
 	virtual void cpu_task() override final;
 	virtual void cpu_sleep() override;
 	virtual void cpu_on_stop() override;
 	virtual ~ppu_thread() override;
 
 	ppu_thread(const ppu_thread_params&, std::string_view name, u32 prio, int detached = 0);
+
+	ppu_thread(const ppu_thread&) = delete;
+	ppu_thread& operator=(const ppu_thread&) = delete;
+
+	using cpu_thread::operator=;
 
 	u64 gpr[32] = {}; // General-Purpose Registers
 	f64 fpr[32] = {}; // Floating Point Registers
@@ -279,11 +297,29 @@ public:
 
 	u32 dbg_step_pc = 0;
 
+	struct call_history_t
+	{
+		std::vector<u32> data;
+		u64 index = 0;
+		u64 last_r1 = umax;
+		u64 last_r2 = umax;
+	} call_history;
+
+	static constexpr u32 call_history_max_size = 4096;
+
+	// For named_thread ctor
+	const struct thread_name_t
+	{
+		const ppu_thread* _this;
+
+		operator std::string() const;
+	} thread_name{ this };
+
 	be_t<u64>* get_stack_arg(s32 i, u64 align = alignof(u64));
 	void exec_task();
 	void fast_call(u32 addr, u32 rtoc);
 
-	static u32 stack_push(u32 size, u32 align_v);
+	static std::pair<vm::addr_t, u32> stack_push(u32 size, u32 align_v);
 	static void stack_pop_verbose(u32 addr, u32 size) noexcept;
 };
 

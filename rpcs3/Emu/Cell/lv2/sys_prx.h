@@ -32,6 +32,12 @@ enum CellPrxError : u32
 	CELL_PRX_ERROR_UNDEFINED_SYMBOL            = 0x80011904, // References undefined symbols
 	CELL_PRX_ERROR_UNSUPPORTED_RELOCATION_TYPE = 0x80011905, // Uses unsupported relocation type
 	CELL_PRX_ERROR_ELF_IS_REGISTERED           = 0x80011910, // Fixed ELF is already registered
+	CELL_PRX_ERROR_NO_EXIT_ENTRY               = 0x80011911,
+};
+
+enum
+{
+	SYS_PRX_MODULE_FILENAME_SIZE = 512
 };
 
 struct sys_prx_get_module_id_by_name_option_t
@@ -118,10 +124,41 @@ struct sys_prx_get_module_list_option_t
 	be_t<u32> unk; // 0
 };
 
+struct sys_prx_register_module_0x20_t
+{
+	be_t<u64> size; // 0x0
+	be_t<u32> toc; // 0x8
+	be_t<u32> toc_size; // 0xC
+	vm::bptr<void> stubs_ea; // 0x10
+	be_t<u32> stubs_size; // 0x14
+	vm::bptr<void> error_handler; // 0x18
+	char pad[4]; // 0x1C
+};
+
+struct sys_prx_register_module_0x30_type_1_t
+{
+	be_t<u64> size; // 0x0
+	be_t<u64> type; // 0x8
+	be_t<u32> unk3; // 0x10
+	be_t<u32> unk4; // 0x14
+	vm::bptr<void> lib_entries_ea; // 0x18
+	be_t<u32> lib_entries_size; // 0x1C
+	vm::bptr<void> lib_stub_ea; // 0x20
+	be_t<u32> lib_stub_size; // 0x24
+	vm::bptr<void> error_handler; // 0x28
+	char pad[4]; // 0x2C
+};
+
 enum : u32
 {
 	SYS_PRX_RESIDENT = 0,
 	SYS_PRX_NO_RESIDENT = 1,
+
+	SYS_PRX_START_OK = 0,
+
+	SYS_PRX_STOP_SUCCESS = 0,
+	SYS_PRX_STOP_OK      = 0,
+	SYS_PRX_STOP_FAILED  = 1
 };
 
 // Unofficial names for PRX state
@@ -160,6 +197,22 @@ enum : u64
 	SYS_PRX_LOAD_MODULE_FLAGS_INVALIDMASK = ~SYS_PRX_LOAD_MODULE_FLAGS_FIXEDADDR,
 };
 
+// PPC
+enum
+{
+	SYS_PRX_R_PPC_ADDR32    = 1,
+	SYS_PRX_R_PPC_ADDR16_LO = 4,
+	SYS_PRX_R_PPC_ADDR16_HI = 5,
+	SYS_PRX_R_PPC_ADDR16_HA = 6,
+
+	SYS_PRX_R_PPC64_ADDR32      = SYS_PRX_R_PPC_ADDR32,
+	SYS_PRX_R_PPC64_ADDR16_LO   = SYS_PRX_R_PPC_ADDR16_LO,
+	SYS_PRX_R_PPC64_ADDR16_HI   = SYS_PRX_R_PPC_ADDR16_HI,
+	SYS_PRX_R_PPC64_ADDR16_HA   = SYS_PRX_R_PPC_ADDR16_HA,
+	SYS_PRX_R_PPC64_ADDR64      = 38,
+	SYS_PRX_VARLINK_TERMINATE32 = 0x00000000
+};
+
 // SysCalls
 
 error_code sys_prx_get_ppu_guid(ppu_thread& ppu);
@@ -172,7 +225,7 @@ error_code _sys_prx_load_module(ppu_thread& ppu, vm::cptr<char> path, u64 flags,
 error_code _sys_prx_start_module(ppu_thread& ppu, u32 id, u64 flags, vm::ptr<sys_prx_start_stop_module_option_t> pOpt);
 error_code _sys_prx_stop_module(ppu_thread& ppu, u32 id, u64 flags, vm::ptr<sys_prx_start_stop_module_option_t> pOpt);
 error_code _sys_prx_unload_module(ppu_thread& ppu, u32 id, u64 flags, vm::ptr<sys_prx_unload_module_option_t> pOpt);
-error_code _sys_prx_register_module(ppu_thread& ppu);
+error_code _sys_prx_register_module(ppu_thread& ppu, vm::cptr<char> name, vm::ptr<void> opt);
 error_code _sys_prx_query_module(ppu_thread& ppu);
 error_code _sys_prx_register_library(ppu_thread& ppu, vm::ptr<void> library);
 error_code _sys_prx_unregister_library(ppu_thread& ppu, vm::ptr<void> library);

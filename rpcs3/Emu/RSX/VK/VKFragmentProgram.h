@@ -1,7 +1,6 @@
 #pragma once
-#include "../Common/FragmentProgramDecompiler.h"
-#include "../Common/GLSLTypes.h"
-#include "Emu/RSX/RSXFragmentProgram.h"
+#include "../Program/FragmentProgramDecompiler.h"
+#include "../Program/GLSLTypes.h"
 #include "VulkanAPI.h"
 #include "VKProgramPipeline.h"
 #include "vkutils/pipeline_binding_table.h"
@@ -70,7 +69,6 @@ public:
 	/**
 	 * Decompile a fragment shader located in the PS3's Memory.  This function operates synchronously.
 	 * @param prog RSXShaderProgram specifying the location and size of the shader in memory
-	 * @param td texture dimensions of input textures
 	 */
 	void Decompile(const RSXFragmentProgram& prog);
 

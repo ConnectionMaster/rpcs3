@@ -20,7 +20,7 @@ LOG_CHANNEL(input_log, "Input");
 namespace pad
 {
 	atomic_t<pad_thread*> g_current = nullptr;
-	std::recursive_mutex g_pad_mutex;
+	shared_mutex g_pad_mutex;
 	std::string g_title_id;
 	atomic_t<bool> g_reset{false};
 	atomic_t<bool> g_enabled{true};
@@ -140,7 +140,7 @@ void pad_thread::Init()
 				cur_pad_handler = std::make_shared<evdev_joystick_handler>();
 				break;
 #endif
-			default:
+			case pad_handler::null:
 				break;
 			}
 			handlers.emplace(handler_type, cur_pad_handler);

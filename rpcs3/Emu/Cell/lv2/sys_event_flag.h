@@ -36,9 +36,7 @@ struct lv2_event_flag final : lv2_obj
 	static const u32 id_base = 0x98000000;
 
 	const lv2_protocol protocol;
-	const u32 shared;
 	const u64 key;
-	const s32 flags;
 	const s32 type;
 	const u64 name;
 
@@ -47,11 +45,9 @@ struct lv2_event_flag final : lv2_obj
 	atomic_t<u64> pattern;
 	std::deque<cpu_thread*> sq;
 
-	lv2_event_flag(u32 protocol, u32 shared, u64 key, s32 flags, s32 type, u64 name, u64 pattern)
-		: protocol{protocol}
-		, shared(shared)
+	lv2_event_flag(u32 protocol, u64 key, s32 type, u64 name, u64 pattern) noexcept
+		: protocol{static_cast<u8>(protocol)}
 		, key(key)
-		, flags(flags)
 		, type(type)
 		, name(name)
 		, pattern(pattern)

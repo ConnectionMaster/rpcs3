@@ -26,9 +26,9 @@
 #include <QApplication>
 #include <QFontDatabase>
 #include <QCompleter>
-#include <QMenu>
 #include <QVBoxLayout>
 #include <QTimer>
+#include <QCheckBox>
 #include <charconv>
 
 #include "util/asm.hpp"
@@ -37,8 +37,11 @@ constexpr auto qstr = QString::fromStdString;
 
 constexpr auto s_pause_flags = cpu_flag::dbg_pause + cpu_flag::dbg_global_pause;
 
-debugger_frame::debugger_frame(std::shared_ptr<gui_settings> settings, QWidget *parent)
-	: custom_dock_widget(tr("Debugger"), parent), xgui_settings(settings)
+extern atomic_t<bool> g_debugger_pause_all_threads_on_bp;
+
+debugger_frame::debugger_frame(std::shared_ptr<gui_settings> gui_settings, QWidget *parent)
+	: custom_dock_widget(tr("Debugger"), parent)
+	, m_gui_settings(std::move(gui_settings))
 {
 	setContentsMargins(0, 0, 0, 0);
 
@@ -58,7 +61,7 @@ debugger_frame::debugger_frame(std::shared_ptr<gui_settings> settings, QWidget *
 	m_breakpoint_handler = new breakpoint_handler();
 	m_breakpoint_list = new breakpoint_list(this, m_breakpoint_handler);
 
-	m_debugger_list = new debugger_list(this, settings, m_breakpoint_handler);
+	m_debugger_list = new debugger_list(this, m_gui_settings, m_breakpoint_handler);
 	m_debugger_list->installEventFilter(this);
 
 	m_call_stack_list = new call_stack_list(this);
@@ -146,7 +149,7 @@ debugger_frame::debugger_frame(std::shared_ptr<gui_settings> settings, QWidget *
 		{
 			// If paused, unpause.
 			// If not paused, add dbg_pause.
-			const auto old = cpu->state.atomic_op([](bs_t<cpu_flag>& state)
+			const auto old = cpu->state.fetch_op([](bs_t<cpu_flag>& state)
 			{
 				if (state & s_pause_flags)
 				{
@@ -156,13 +159,17 @@ debugger_frame::debugger_frame(std::shared_ptr<gui_settings> settings, QWidget *
 				{
 					state += cpu_flag::dbg_pause;
 				}
-
-				return state;
 			});
 
 			// Notify only if no pause flags are set after this change
-			if (!(old & s_pause_flags))
+			if (old & s_pause_flags)
 			{
+				if (g_debugger_pause_all_threads_on_bp && Emu.IsPaused() && (old & s_pause_flags) == s_pause_flags)
+				{
+					// Resume all threads were paused by this breakpoint
+					Emu.Resume();
+				}
+
 				cpu->state.notify_one(s_pause_flags);
 			}
 		}
@@ -174,8 +181,8 @@ debugger_frame::debugger_frame(std::shared_ptr<gui_settings> settings, QWidget *
 		m_choice_units->clearFocus();
 	});
 
-	connect(m_choice_units, static_cast<void (QComboBox::*)(int)>(&QComboBox::activated), this, &debugger_frame::UpdateUI);
-	connect(m_choice_units, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this, &debugger_frame::OnSelectUnit);
+	connect(m_choice_units, QOverload<int>::of(&QComboBox::activated), this, &debugger_frame::UpdateUI);
+	connect(m_choice_units, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &debugger_frame::OnSelectUnit);
 	connect(this, &QDockWidget::visibilityChanged, this, &debugger_frame::EnableUpdateTimer);
 
 	connect(m_debugger_list, &debugger_list::BreakpointRequested, m_breakpoint_list, &breakpoint_list::HandleBreakpointRequest);
@@ -188,28 +195,28 @@ debugger_frame::debugger_frame(std::shared_ptr<gui_settings> settings, QWidget *
 	UpdateUnitList();
 }
 
-void debugger_frame::SaveSettings()
+void debugger_frame::SaveSettings() const
 {
-	xgui_settings->SetValue(gui::d_splitterState, m_splitter->saveState());
+	m_gui_settings->SetValue(gui::d_splitterState, m_splitter->saveState());
 }
 
-void debugger_frame::ChangeColors()
+void debugger_frame::ChangeColors() const
 {
 	if (m_debugger_list)
 	{
 		m_debugger_list->m_color_bp = m_breakpoint_list->m_color_bp = gui::utils::get_label_color("debugger_frame_breakpoint", QPalette::Window);
 		m_debugger_list->m_color_pc = gui::utils::get_label_color("debugger_frame_pc", QPalette::Window);
-		m_debugger_list->m_text_color_bp = m_breakpoint_list->m_text_color_bp = gui::utils::get_label_color("debugger_frame_breakpoint");;
-		m_debugger_list->m_text_color_pc = gui::utils::get_label_color("debugger_frame_pc");;
+		m_debugger_list->m_text_color_bp = m_breakpoint_list->m_text_color_bp = gui::utils::get_label_color("debugger_frame_breakpoint");
+		m_debugger_list->m_text_color_pc = gui::utils::get_label_color("debugger_frame_pc");
 	}
 }
 
-bool debugger_frame::eventFilter(QObject* object, QEvent* ev)
+bool debugger_frame::eventFilter(QObject* object, QEvent* event)
 {
 	// There's no overlap between keys so returning true wouldn't matter.
-	if (object == m_debugger_list && ev->type() == QEvent::KeyPress)
+	if (object == m_debugger_list && event->type() == QEvent::KeyPress)
 	{
-		keyPressEvent(static_cast<QKeyEvent*>(ev));
+		keyPressEvent(static_cast<QKeyEvent*>(event));
 	}
 	return false;
 }
@@ -223,7 +230,7 @@ void debugger_frame::closeEvent(QCloseEvent *event)
 void debugger_frame::showEvent(QShowEvent * event)
 {
 	// resize splitter widgets
-	if (!m_splitter->restoreState(xgui_settings->GetValue(gui::d_splitterState).toByteArray()))
+	if (!m_splitter->restoreState(m_gui_settings->GetValue(gui::d_splitterState).toByteArray()))
 	{
 		const int width_right = width() / 3;
 		const int width_left = width() - width_right;
@@ -236,8 +243,33 @@ void debugger_frame::showEvent(QShowEvent * event)
 void debugger_frame::hideEvent(QHideEvent * event)
 {
 	// save splitter state or it will resume its initial state on next show
-	xgui_settings->SetValue(gui::d_splitterState, m_splitter->saveState());
+	m_gui_settings->SetValue(gui::d_splitterState, m_splitter->saveState());
 	QDockWidget::hideEvent(event);
+}
+
+void debugger_frame::open_breakpoints_settings()
+{
+	QDialog* dlg = new QDialog(this);
+	dlg->setWindowTitle(tr("Breakpoint Settings"));
+	dlg->setModal(true);
+
+	QCheckBox* check_box = new QCheckBox(tr("Pause All Threads On Hit"), dlg);
+	check_box->setCheckable(true);
+	check_box->setChecked(g_debugger_pause_all_threads_on_bp.load());
+	check_box->setToolTip(tr("When set: a breakpoint hit will pause the emulation instead of the current thread."
+		"\nApplies on all breakpoints in all threads regardless if set before or after changing this setting."));
+
+	connect(check_box, &QCheckBox::clicked, dlg, [](bool checked) { g_debugger_pause_all_threads_on_bp = checked; });
+
+	QPushButton* button_ok = new QPushButton(tr("OK"), dlg);
+	connect(button_ok, &QAbstractButton::clicked, dlg, &QDialog::accept);
+
+	QHBoxLayout* hbox_layout = new QHBoxLayout(dlg);
+	hbox_layout->addWidget(check_box);
+	hbox_layout->addWidget(button_ok);
+	dlg->setLayout(hbox_layout);
+	dlg->setAttribute(Qt::WA_DeleteOnClose);
+	dlg->exec();
 }
 
 void debugger_frame::keyPressEvent(QKeyEvent* event)
@@ -248,20 +280,25 @@ void debugger_frame::keyPressEvent(QKeyEvent* event)
 	}
 
 	const auto cpu = get_cpu();
-	int i = m_debugger_list->currentRow();
+	const int row = m_debugger_list->currentRow();
 
 	switch (event->key())
 	{
 	case Qt::Key_F1:
 	{
+		if (event->isAutoRepeat())
+			return;
+
 		QDialog* dlg = new QDialog(this);
 		dlg->setAttribute(Qt::WA_DeleteOnClose);
 		dlg->setWindowTitle(tr("Debugger Guide & Shortcuts"));
 
 		QLabel* l = new QLabel(tr(
 			"Keys Ctrl+G: Go to typed address."
+			"\nKeys Ctrl+B: Open breakpoints settings."
 			"\nKeys Alt+S: Capture SPU images of selected SPU."
 			"\nKey D: SPU MFC commands logger, MFC debug setting must be enabled."
+			"\nKey D: Also PPU calling history logger, interpreter and non-zero call history size must be used."
 			"\nKey E: Instruction Editor: click on the instruction you want to modify, then press E."
 			"\nKey F: Dedicated floating point mode switch for SPU threads."
 			"\nKey R: Registers Editor for selected thread."
@@ -287,6 +324,7 @@ void debugger_frame::keyPressEvent(QKeyEvent* event)
 		dlg->exec();
 		return;
 	}
+	default: break;
 	}
 
 	if (!cpu)
@@ -295,12 +333,15 @@ void debugger_frame::keyPressEvent(QKeyEvent* event)
 	}
 
 	const u32 address_limits = (cpu->id_type() == 2 ? 0x3fffc : ~3);
-	const u32 pc = (i >= 0 ? m_debugger_list->m_pc + i * 4 : cpu->get_pc()) & address_limits;
+	const u32 pc = (row >= 0 ? m_debugger_list->m_pc + row * 4 : cpu->get_pc()) & address_limits;
 
 	const auto modifiers = QApplication::keyboardModifiers();
 
 	if (modifiers & Qt::ControlModifier)
 	{
+		if (event->isAutoRepeat())
+			return;
+
 		switch (event->key())
 		{
 		case Qt::Key_G:
@@ -308,6 +349,12 @@ void debugger_frame::keyPressEvent(QKeyEvent* event)
 			ShowGotoAddressDialog();
 			return;
 		}
+		case Qt::Key_B:
+		{
+			open_breakpoints_settings();
+			return;
+		}
+		default: break;
 		}
 	}
 	else
@@ -316,10 +363,12 @@ void debugger_frame::keyPressEvent(QKeyEvent* event)
 		{
 		case Qt::Key_D:
 		{
-			if (cpu->id_type() == 2 && g_cfg.core.mfc_debug && !cpu->is_stopped())
+			if (event->isAutoRepeat())
+				return;
+
+			auto get_max_allowed = [&](QString title, QString description, u32 limit) -> u32
 			{
-				input_dialog dlg(4, "", tr("Max MFC cmds logged"),
-					tr("Decimal only, max allowed is 1820."), "0", this);
+				input_dialog dlg(4, "", title, description.arg(limit), QString::number(limit), this);
 
 				QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
 				mono.setPointSize(8);
@@ -334,7 +383,7 @@ void debugger_frame::keyPressEvent(QKeyEvent* event)
 				{
 					bool ok = false;
 					const u32 dummy = changed.toUInt(&ok, 10);
-					ok = ok && dummy && dummy <= spu_thread::max_mfc_dump_idx;
+					ok = ok && dummy && dummy <= limit;
 					dlg.set_button_enabled(QDialogButtonBox::StandardButton::Ok, ok);
 
 					if (ok)
@@ -348,30 +397,71 @@ void debugger_frame::keyPressEvent(QKeyEvent* event)
 					max = 0;
 				}
 
-				auto spu = static_cast<spu_thread*>(cpu);
+				return max;
+			};
 
-				auto ptr = reinterpret_cast<const mfc_cmd_dump*>(vm::g_stat_addr + spu->vm_offset());
+			auto copy_overlapping_list = [&] <typename T> (u64& index, u64 max, const std::vector<T>& in, std::vector<T>& out, bool& emptied)
+			{
+				const u64 current_pos = index % in.size();
+				const u64 last_elements = std::min<u64>(current_pos, max);
+				const u64 overlapped_old_elements = std::min<u64>(index, max) - last_elements;
+
+				out.resize(overlapped_old_elements + last_elements);
+
+				// Save list contents (only the relavant parts)
+				std::copy(in.end() - overlapped_old_elements, in.end(), out.begin());
+				std::copy_n(in.begin() + current_pos - last_elements, last_elements, out.begin() + overlapped_old_elements);
+
+				// Check if max elements to log is larger/equal to current list size
+				if ((emptied = index && max >= index))
+				{
+					// Empty list when possible (further calls' history logging will not log any call before this)
+					index = 0;
+				}
+			};
+
+
+			if (cpu->id_type() == 2 && g_cfg.core.mfc_debug)
+			{
+				const u32 max = get_max_allowed(tr("Max MFC cmds logged"), tr("Decimal only, max allowed is %0."), spu_thread::max_mfc_dump_idx);
+
+				// Preallocate in order to save execution time when inside suspend_all.
+				std::vector<mfc_cmd_dump> copy(max);
+
+				bool emptied = false;
+
+				cpu_thread::suspend_all(nullptr, {}, [&]
+				{
+					const auto spu = static_cast<spu_thread*>(cpu);
+					copy_overlapping_list(spu->mfc_dump_idx, max, spu->mfc_history, copy, emptied);
+				});
 
 				std::string ret;
 
-				for (u64 count = 0, idx = spu->mfc_dump_idx - 1; idx != umax && count < max; count++, idx--)
+				u32 i = 0;
+				for (auto it = copy.rbegin(); it != copy.rend(); it++, i++)
 				{
-					auto dump = ptr[idx % spu_thread::max_mfc_dump_idx];
+					auto& dump = *it;
 
 					const u32 pc = std::exchange(dump.cmd.eah, 0);
-					fmt::append(ret, "\n(%d) PC 0x%05x: [%s]", count, pc, dump.cmd);
+					fmt::append(ret, "\n(%d) PC 0x%05x: [%s]", i, pc, dump.cmd);
 
 					if (dump.cmd.cmd == MFC_PUTLLC_CMD)
 					{
 						fmt::append(ret, " %s", dump.cmd.tag == MFC_PUTLLC_SUCCESS ? "(passed)" : "(failed)");
 					}
 
-					const auto data = reinterpret_cast<const be_t<u32>*>(dump.data);
+					auto load = [&](usz index)
+					{
+						be_t<u32> data{};
+						std::memcpy(&data, dump.data + index * sizeof(data), sizeof(data));
+						return data;
+					};
 
 					for (usz i = 0; i < utils::aligned_div(std::min<u32>(dump.cmd.size, 128), 4); i += 4)
 					{
-						fmt::append(ret, "\n[0x%02x] %08x %08x %08x %08x", i * sizeof(data[0])
-							, data[i + 0], data[i + 1], data[i + 2], data[i + 3]);
+						fmt::append(ret, "\n[0x%02x] %08x %08x %08x %08x", i * sizeof(be_t<u32>)
+							, load(i + 0), load(i + 1), load(i + 2), load(i + 3));
 					}
 				}
 
@@ -380,12 +470,59 @@ void debugger_frame::keyPressEvent(QKeyEvent* event)
 					ret = "No MFC commands have been logged";
 				}
 
-				spu_log.warning("SPU MFC dump of '%s': %s", spu->get_name(), ret);
+				if (emptied)
+				{
+					ret += "\nPrevious MFC history has been emptied!";
+				}
+
+				spu_log.success("SPU MFC dump of '%s': %s", cpu->get_name(), ret);
 			}
+			else if (cpu->id_type() == 1 && g_cfg.core.ppu_call_history)
+			{
+				const u32 max = get_max_allowed(tr("Max PPU calls logged"), tr("Decimal only, max allowed is %0."), ppu_thread::call_history_max_size);
+
+				// Preallocate in order to save execution time when inside suspend_all.
+				std::vector<u32> copy(max);
+
+				bool emptied = false;
+
+				cpu_thread::suspend_all(nullptr, {}, [&]
+				{
+					auto& list = static_cast<ppu_thread*>(cpu)->call_history;
+					copy_overlapping_list(list.index, max, list.data, copy, emptied);
+				});
+
+				std::string ret;
+
+				PPUDisAsm dis_asm(cpu_disasm_mode::normal, vm::g_sudo_addr);
+				u32 i = 0;
+
+				for (auto it = copy.rbegin(); it != copy.rend(); it++, i++)
+				{
+					dis_asm.disasm(*it);
+					fmt::append(ret, "\n(%u) 0x%08x: %s", i, *it, dis_asm.last_opcode);
+				}
+	
+				if (ret.empty())
+				{
+					ret = "No PPU calls have been logged";
+				}
+
+				if (emptied)
+				{
+					ret += "\nPrevious call history has been emptied!";
+				}
+
+				ppu_log.success("PPU calling history dump of '%s': %s", cpu->get_name(), ret);
+			}
+
 			return;
 		}
 		case Qt::Key_E:
 		{
+			if (event->isAutoRepeat())
+				return;
+
 			if (cpu->id_type() == 1 || cpu->id_type() == 2)
 			{
 				if (!m_inst_editor)
@@ -399,16 +536,20 @@ void debugger_frame::keyPressEvent(QKeyEvent* event)
 		}
 		case Qt::Key_F:
 		{
-			if (cpu->id_type() != 2)
-			{
+			if (event->isAutoRepeat())
 				return;
-			}
+
+			if (cpu->id_type() != 2)
+				return;
 
 			static_cast<spu_thread*>(cpu)->debugger_float_mode ^= 1; // Switch mode
 			return;
 		}
 		case Qt::Key_R:
 		{
+			if (event->isAutoRepeat())
+				return;
+
 			if (cpu->id_type() == 1 || cpu->id_type() == 2)
 			{
 				if (!m_reg_editor)
@@ -422,6 +563,9 @@ void debugger_frame::keyPressEvent(QKeyEvent* event)
 		}
 		case Qt::Key_S:
 		{
+			if (event->isAutoRepeat())
+				return;
+
 			if (modifiers & Qt::AltModifier)
 			{
 				if (cpu->id_type() != 2)
@@ -438,7 +582,7 @@ void debugger_frame::keyPressEvent(QKeyEvent* event)
 			// Next instruction according to code flow
 			// Known branch targets are selected over next PC for conditional branches
 			// Indirect branches (unknown targets, such as function return) do not proceed to any instruction
-			std::array<u32, 2> res{UINT32_MAX, UINT32_MAX};
+			std::array<u32, 2> res{umax, umax};
 
 			switch (cpu->id_type())
 			{
@@ -459,13 +603,16 @@ void debugger_frame::keyPressEvent(QKeyEvent* event)
 			default: break;
 			}
 
-			if (auto pos = std::basic_string_view<u32>(res.data(), 2).find_last_not_of(UINT32_MAX); pos != umax)
-				m_debugger_list->ShowAddress(res[pos] - std::max(i, 0) * 4, true, true);
+			if (const usz pos = std::basic_string_view<u32>(res.data(), 2).find_last_not_of(umax); pos != umax)
+				m_debugger_list->ShowAddress(res[pos] - std::max(row, 0) * 4, true, true);
 
 			return;
 		}
 		case Qt::Key_M:
 		{
+			if (event->isAutoRepeat())
+				return;
+
 			// Memory viewer
 			idm::make<memory_viewer_handle>(this, pc, make_check_cpu(cpu));
 			return;
@@ -480,6 +627,7 @@ void debugger_frame::keyPressEvent(QKeyEvent* event)
 			DoStep(false);
 			return;
 		}
+		default: break;
 		}
 	}
 }
@@ -521,7 +669,7 @@ cpu_thread* debugger_frame::get_cpu()
 
 std::function<cpu_thread*()> debugger_frame::make_check_cpu(cpu_thread* cpu)
 {
-	const u32 id = cpu ? cpu->id : UINT32_MAX;
+	const u32 id = cpu ? cpu->id : umax;
 	const u32 type = id >> 24;
 
 	std::shared_ptr<cpu_thread> shared = type == 1 ? static_cast<std::shared_ptr<cpu_thread>>(idm::get<named_thread<ppu_thread>>(id)) :
@@ -576,11 +724,11 @@ void debugger_frame::UpdateUI()
 		const auto size_context = cpu->id_type() == 1 ? sizeof(ppu_thread) :
 			cpu->id_type() == 2 ? sizeof(spu_thread) : sizeof(cpu_thread);
 
-		if (m_last_pc != cia || m_last_query_state.size() != size_context || std::memcmp(m_last_query_state.data(), cpu, size_context))
+		if (m_last_pc != cia || m_last_query_state.size() != size_context || std::memcmp(m_last_query_state.data(), static_cast<void *>(cpu), size_context))
 		{
 			// Copy thread data
 			m_last_query_state.resize(size_context);
-			std::memcpy(m_last_query_state.data(), cpu, size_context);
+			std::memcpy(m_last_query_state.data(), static_cast<void *>(cpu), size_context);
 
 			m_last_pc = cia;
 			DoUpdate();
@@ -632,8 +780,10 @@ void debugger_frame::UpdateUnitList()
 	{
 		if (emu_state == system_state::stopped) return;
 
-		QVariant var_cpu = QVariant::fromValue<std::pair<cpu_thread*, u32>>(std::make_pair(&cpu, id));
-		m_choice_units->addItem(qstr(id >> 24 == 0x55 ? "RSX[0x55555555]" : cpu.get_name()), var_cpu);
+		const QVariant var_cpu = QVariant::fromValue<std::pair<cpu_thread*, u32>>(std::make_pair(&cpu, id));
+
+		// Space at the end is to pad a gap on the right
+		m_choice_units->addItem(qstr((id >> 24 == 0x55 ? "RSX[0x55555555]" : cpu.get_name()) + ' '), var_cpu);
 
 		if (!reselected && old_cpu == var_cpu)
 		{
@@ -651,7 +801,7 @@ void debugger_frame::UpdateUnitList()
 		idm::select<named_thread<ppu_thread>>(on_select);
 		idm::select<named_thread<spu_thread>>(on_select);
 
-		if (auto render = g_fxo->try_get<rsx::thread>(); emu_state != system_state::stopped && render && render->ctrl)
+		if (const auto render = g_fxo->try_get<rsx::thread>(); emu_state != system_state::stopped && render && render->ctrl)
 		{
 			on_select(render->id, *render);
 		}
@@ -762,7 +912,7 @@ void debugger_frame::OnSelectUnit()
 void debugger_frame::DoUpdate()
 {
 	// Check if we need to disable a step over bp
-	if (auto cpu0 = get_cpu(); cpu0 && m_last_step_over_breakpoint != umax && cpu0->get_pc() == m_last_step_over_breakpoint)
+	if (const auto cpu0 = get_cpu(); cpu0 && m_last_step_over_breakpoint != umax && cpu0->get_pc() == m_last_step_over_breakpoint)
 	{
 		m_breakpoint_handler->RemoveBreakpoint(m_last_step_over_breakpoint);
 		m_last_step_over_breakpoint = -1;
@@ -783,9 +933,7 @@ void debugger_frame::WritePanels()
 		return;
 	}
 
-	int loc;
-
-	loc = m_misc_state->verticalScrollBar()->value();
+	int loc = m_misc_state->verticalScrollBar()->value();
 	m_misc_state->clear();
 	m_misc_state->setText(qstr(cpu->dump_misc()));
 	m_misc_state->verticalScrollBar()->setValue(loc);
@@ -814,7 +962,7 @@ void debugger_frame::ShowGotoAddressDialog()
 	expression_input->setFont(m_mono);
 	expression_input->setMaxLength(18);
 
-	if (auto thread = get_cpu(); !thread || thread->id_type() != 2)
+	if (const auto thread = get_cpu(); !thread || thread->id_type() != 2)
 	{
 		expression_input->setValidator(new QRegExpValidator(QRegExp("^(0[xX])?0*[a-fA-F0-9]{0,8}$")));
 	}
@@ -869,11 +1017,11 @@ u64 debugger_frame::EvaluateExpression(const QString& expression)
 	const u64 res = static_cast<u64>(fixed_expression.toULong(&ok, 16));
 
 	if (ok) return res;
-	if (auto thread = get_cpu()) return thread->get_pc();
+	if (const auto thread = get_cpu()) return thread->get_pc();
 	return 0;
 }
 
-void debugger_frame::ClearBreakpoints()
+void debugger_frame::ClearBreakpoints() const
 {
 	m_breakpoint_list->ClearBreakpoints();
 }
@@ -898,14 +1046,14 @@ void debugger_frame::DoStep(bool step_over)
 	{
 		bool should_step_over = step_over && cpu->id_type() == 1;
 
-		if (auto _state = +cpu->state; _state & s_pause_flags && _state & cpu_flag::wait && !(_state & cpu_flag::dbg_step))
+		if (const auto _state = +cpu->state; _state & s_pause_flags && _state & cpu_flag::wait && !(_state & cpu_flag::dbg_step))
 		{
 			if (should_step_over)
 			{
-				u32 current_instruction_pc = cpu->get_pc();
+				const u32 current_instruction_pc = cpu->get_pc();
 
 				// Set breakpoint on next instruction
-				u32 next_instruction_pc = current_instruction_pc + 4;
+				const u32 next_instruction_pc = current_instruction_pc + 4;
 				m_breakpoint_handler->AddBreakpoint(next_instruction_pc);
 
 				// Undefine previous step over breakpoint if it hasnt been already
@@ -939,7 +1087,7 @@ void debugger_frame::DoStep(bool step_over)
 	UpdateUI();
 }
 
-void debugger_frame::EnableUpdateTimer(bool enable)
+void debugger_frame::EnableUpdateTimer(bool enable) const
 {
 	enable ? m_update->start(50) : m_update->stop();
 }

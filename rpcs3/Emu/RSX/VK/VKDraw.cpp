@@ -21,7 +21,7 @@ namespace vk
 		case rsx::texture_dimension_extended::texture_dimension_3d:
 			return VK_IMAGE_VIEW_TYPE_3D;
 		default: fmt::throw_exception("Unreachable");
-		};
+		}
 	}
 
 	VkCompareOp get_compare_func(rsx::comparison_function op, bool reverse_direction = false)
@@ -70,7 +70,7 @@ void VKGSRender::update_draw_state()
 {
 	m_profiler.start();
 
-	float actual_line_width = rsx::method_registers.line_width();
+	const float actual_line_width = m_device->get_wide_lines_support()? rsx::method_registers.line_width() : 1.f;
 	vkCmdSetLineWidth(*m_current_command_buffer, actual_line_width);
 
 	if (rsx::method_registers.poly_offset_fill_enabled())
@@ -146,9 +146,9 @@ void VKGSRender::load_texture_env()
 {
 	// Load textures
 	bool check_for_cyclic_refs = false;
-	auto check_surface_cache_sampler = [&](auto descriptor)
+	auto check_surface_cache_sampler = [&](auto descriptor, const auto& tex)
 	{
-		if (!m_texture_cache.test_if_descriptor_expired(*m_current_command_buffer, m_rtts, descriptor))
+		if (!m_texture_cache.test_if_descriptor_expired(*m_current_command_buffer, m_rtts, descriptor, tex))
 		{
 			check_for_cyclic_refs |= descriptor->is_cyclic_reference;
 			return true;
@@ -168,12 +168,14 @@ void VKGSRender::load_texture_env()
 			fs_sampler_state[i] = std::make_unique<vk::texture_cache::sampled_image_descriptor>();
 
 		auto sampler_state = static_cast<vk::texture_cache::sampled_image_descriptor*>(fs_sampler_state[i].get());
-		if (m_samplers_dirty || m_textures_dirty[i] || !check_surface_cache_sampler(sampler_state))
+		const auto& tex = rsx::method_registers.fragment_textures[i];
+
+		if (m_samplers_dirty || m_textures_dirty[i] || !check_surface_cache_sampler(sampler_state, tex))
 		{
-			if (rsx::method_registers.fragment_textures[i].enabled())
+			if (tex.enabled())
 			{
 				check_heap_status(VK_HEAP_CHECK_TEXTURE_UPLOAD_STORAGE);
-				*sampler_state = m_texture_cache.upload_texture(*m_current_command_buffer, rsx::method_registers.fragment_textures[i], m_rtts);
+				*sampler_state = m_texture_cache.upload_texture(*m_current_command_buffer, tex, m_rtts);
 
 				if (sampler_state->is_cyclic_reference)
 				{
@@ -186,21 +188,21 @@ void VKGSRender::load_texture_env()
 				f32 min_lod = 0.f, max_lod = 0.f;
 				f32 lod_bias = 0.f;
 
-				const u32 texture_format = rsx::method_registers.fragment_textures[i].format() & ~(CELL_GCM_TEXTURE_UN | CELL_GCM_TEXTURE_LN);
+				const u32 texture_format = tex.format() & ~(CELL_GCM_TEXTURE_UN | CELL_GCM_TEXTURE_LN);
 				VkBool32 compare_enabled = VK_FALSE;
 				VkCompareOp depth_compare_mode = VK_COMPARE_OP_NEVER;
 
 				if (texture_format >= CELL_GCM_TEXTURE_DEPTH24_D8 && texture_format <= CELL_GCM_TEXTURE_DEPTH16_FLOAT)
 				{
 					compare_enabled = VK_TRUE;
-					depth_compare_mode = vk::get_compare_func(rsx::method_registers.fragment_textures[i].zfunc(), true);
+					depth_compare_mode = vk::get_compare_func(tex.zfunc(), true);
 				}
 
-				const f32 af_level = vk::max_aniso(rsx::method_registers.fragment_textures[i].max_aniso());
-				const auto wrap_s = vk::vk_wrap_mode(rsx::method_registers.fragment_textures[i].wrap_s());
-				const auto wrap_t = vk::vk_wrap_mode(rsx::method_registers.fragment_textures[i].wrap_t());
-				const auto wrap_r = vk::vk_wrap_mode(rsx::method_registers.fragment_textures[i].wrap_r());
-				const auto border_color = vk::get_border_color(rsx::method_registers.fragment_textures[i].border_color());
+				const f32 af_level = vk::max_aniso(tex.max_aniso());
+				const auto wrap_s = vk::vk_wrap_mode(tex.wrap_s());
+				const auto wrap_t = vk::vk_wrap_mode(tex.wrap_t());
+				const auto wrap_r = vk::vk_wrap_mode(tex.wrap_r());
+				const auto border_color = vk::get_border_color(tex.border_color());
 
 				// Check if non-point filtering can even be used on this format
 				bool can_sample_linear;
@@ -218,12 +220,12 @@ void VKGSRender::load_texture_env()
 					can_sample_linear = m_device->get_format_properties(vk_format).optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
 				}
 
-				const auto mipmap_count = rsx::method_registers.fragment_textures[i].get_exact_mipmap_count();
-				min_filter = vk::get_min_filter(rsx::method_registers.fragment_textures[i].min_filter());
+				const auto mipmap_count = tex.get_exact_mipmap_count();
+				min_filter = vk::get_min_filter(tex.min_filter());
 
 				if (can_sample_linear)
 				{
-					mag_filter = vk::get_mag_filter(rsx::method_registers.fragment_textures[i].mag_filter());
+					mag_filter = vk::get_mag_filter(tex.mag_filter());
 				}
 				else
 				{
@@ -250,9 +252,9 @@ void VKGSRender::load_texture_env()
 
 					if (actual_mipmaps > 1.f)
 					{
-						min_lod = rsx::method_registers.fragment_textures[i].min_lod();
-						max_lod = rsx::method_registers.fragment_textures[i].max_lod();
-						lod_bias = rsx::method_registers.fragment_textures[i].bias();
+						min_lod = tex.min_lod();
+						max_lod = tex.max_lod();
+						lod_bias = tex.bias();
 
 						min_lod = std::min(min_lod, actual_mipmaps - 1.f);
 						max_lod = std::min(max_lod, actual_mipmaps - 1.f);
@@ -304,12 +306,14 @@ void VKGSRender::load_texture_env()
 			vs_sampler_state[i] = std::make_unique<vk::texture_cache::sampled_image_descriptor>();
 
 		auto sampler_state = static_cast<vk::texture_cache::sampled_image_descriptor*>(vs_sampler_state[i].get());
-		if (m_samplers_dirty || m_vertex_textures_dirty[i] || !check_surface_cache_sampler(sampler_state))
+		const auto& tex = rsx::method_registers.vertex_textures[i];
+
+		if (m_samplers_dirty || m_vertex_textures_dirty[i] || !check_surface_cache_sampler(sampler_state, tex))
 		{
 			if (rsx::method_registers.vertex_textures[i].enabled())
 			{
 				check_heap_status(VK_HEAP_CHECK_TEXTURE_UPLOAD_STORAGE);
-				*sampler_state = m_texture_cache.upload_texture(*m_current_command_buffer, rsx::method_registers.vertex_textures[i], m_rtts);
+				*sampler_state = m_texture_cache.upload_texture(*m_current_command_buffer, tex, m_rtts);
 
 				if (sampler_state->is_cyclic_reference || sampler_state->external_subresource_desc.do_not_cache)
 				{
@@ -317,10 +321,10 @@ void VKGSRender::load_texture_env()
 				}
 
 				bool replace = !vs_sampler_handles[i];
-				const VkBool32 unnormalized_coords = !!(rsx::method_registers.vertex_textures[i].format() & CELL_GCM_TEXTURE_UN);
-				const auto min_lod = rsx::method_registers.vertex_textures[i].min_lod();
-				const auto max_lod = rsx::method_registers.vertex_textures[i].max_lod();
-				const auto border_color = vk::get_border_color(rsx::method_registers.vertex_textures[i].border_color());
+				const VkBool32 unnormalized_coords = !!(tex.format() & CELL_GCM_TEXTURE_UN);
+				const auto min_lod = tex.min_lod();
+				const auto max_lod = tex.max_lod();
+				const auto border_color = vk::get_border_color(tex.border_color());
 
 				if (vs_sampler_handles[i])
 				{
@@ -441,7 +445,7 @@ void VKGSRender::bind_texture_env()
 				::glsl::program_domain::glsl_fragment_program,
 				m_current_frame->descriptor_set);
 
-			if (current_fragment_program.redirected_textures & (1 << i))
+			if (current_fragment_program.texture_state.redirected_textures & (1 << i))
 			{
 				// Stencil mirror required
 				auto root_image = static_cast<vk::viewable_image*>(view->image());
@@ -473,7 +477,7 @@ void VKGSRender::bind_texture_env()
 				::glsl::program_domain::glsl_fragment_program,
 				m_current_frame->descriptor_set);
 
-			if (current_fragment_program.redirected_textures & (1 << i))
+			if (current_fragment_program.texture_state.redirected_textures & (1 << i))
 			{
 				m_program->bind_uniform({ vk::null_sampler(), vk::null_image_view(*m_current_command_buffer, view_type)->value, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
 					i,
@@ -699,32 +703,35 @@ void VKGSRender::emit_geometry(u32 sub_index)
 	auto &draw_call = rsx::method_registers.current_draw_clause;
 	m_profiler.start();
 
-	if (sub_index == 0)
+	const flags32_t vertex_state_mask = rsx::vertex_base_changed | rsx::vertex_arrays_changed;
+	const flags32_t vertex_state = (sub_index == 0) ? rsx::vertex_arrays_changed : draw_call.execute_pipeline_dependencies() & vertex_state_mask;
+
+	if (vertex_state & rsx::vertex_arrays_changed)
 	{
 		analyse_inputs_interleaved(m_vertex_layout);
-
-		if (!m_vertex_layout.validate())
-		{
-			// No vertex inputs enabled
-			// Execute remainining pipeline barriers with NOP draw
-			do
-			{
-				draw_call.execute_pipeline_dependencies();
-			}
-			while (draw_call.next());
-
-			draw_call.end();
-			return;
-		}
 	}
-	else if (draw_call.execute_pipeline_dependencies() & rsx::vertex_base_changed)
+	else if (vertex_state & rsx::vertex_base_changed)
 	{
 		// Rebase vertex bases instead of
-		for (auto &info : m_vertex_layout.interleaved_blocks)
+		for (auto& info : m_vertex_layout.interleaved_blocks)
 		{
 			const auto vertex_base_offset = rsx::method_registers.vertex_data_base_offset();
 			info.real_offset_address = rsx::get_address(rsx::get_vertex_offset_from_base(vertex_base_offset, info.base_offset), info.memory_location);
 		}
+	}
+
+	if (vertex_state && !m_vertex_layout.validate())
+	{
+		// No vertex inputs enabled
+		// Execute remainining pipeline barriers with NOP draw
+		do
+		{
+			draw_call.execute_pipeline_dependencies();
+		}
+		while (draw_call.next());
+
+		draw_call.end();
+		return;
 	}
 
 	const auto old_persistent_buffer = m_persistent_attribute_storage ? m_persistent_attribute_storage->value : null_buffer_view->value;
@@ -983,14 +990,14 @@ void VKGSRender::end()
 	if (m_current_command_buffer->flags & vk::command_buffer::cb_load_occluson_task)
 	{
 		u32 occlusion_id = m_occlusion_query_manager->allocate_query(*m_current_command_buffer);
-		if (occlusion_id == UINT32_MAX)
+		if (occlusion_id == umax)
 		{
 			// Force flush
 			rsx_log.error("[Performance Warning] Out of free occlusion slots. Forcing hard sync.");
 			ZCULL_control::sync(this);
 
 			occlusion_id = m_occlusion_query_manager->allocate_query(*m_current_command_buffer);
-			if (occlusion_id == UINT32_MAX)
+			if (occlusion_id == umax)
 			{
 				//rsx_log.error("Occlusion pool overflow");
 				if (m_current_task) m_current_task->result = 1;

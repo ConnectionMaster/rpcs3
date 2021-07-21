@@ -80,18 +80,12 @@ struct Keyboard
 	std::vector<KbButton> m_buttons;
 
 	Keyboard()
-		: m_data()
-		, m_config()
 	{
 	}
 };
 
 class KeyboardHandlerBase
 {
-protected:
-	KbInfo m_info;
-	std::vector<Keyboard> m_keyboards;
-
 public:
 	std::mutex m_mutex;
 
@@ -102,7 +96,7 @@ public:
 	void Key(u32 code, bool pressed);
 	void SetIntercepted(bool intercepted);
 
-	bool IsMetaKey(u32 code);
+	static bool IsMetaKey(u32 code);
 
 	KbInfo& GetInfo() { return m_info; }
 	std::vector<Keyboard>& GetKeyboards() { return m_keyboards; }
@@ -111,4 +105,10 @@ public:
 	KbConfig& GetConfig(const u32 keyboard) { return m_keyboards[keyboard].m_config; }
 
 	stx::init_mutex init;
+
+protected:
+	void ReleaseAllKeys();
+
+	KbInfo m_info;
+	std::vector<Keyboard> m_keyboards;
 };

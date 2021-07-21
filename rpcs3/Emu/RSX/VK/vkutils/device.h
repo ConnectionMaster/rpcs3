@@ -31,6 +31,9 @@ namespace vk
 		u32 host_visible_coherent;
 		u32 device_local;
 
+		u64 device_local_total_bytes;
+		u64 host_visible_total_bytes;
+
 		PFN_vkGetMemoryHostPointerPropertiesEXT _vkGetMemoryHostPointerPropertiesEXT;
 	};
 
@@ -52,6 +55,7 @@ namespace vk
 		bool external_memory_host_support = false;
 		bool unrestricted_depth_range_support = false;
 		bool surface_capabilities_2_support = false;
+		bool debug_utils_support = false;
 
 		friend class render_device;
 	private:
@@ -72,9 +76,10 @@ namespace vk
 
 		u32 get_queue_count() const;
 
-		VkQueueFamilyProperties get_queue_properties(u32 queue);
-		VkPhysicalDeviceMemoryProperties get_memory_properties() const;
-		VkPhysicalDeviceLimits get_limits() const;
+		// Device properties. These structs can be large so use with care.
+		const VkQueueFamilyProperties& get_queue_properties(u32 queue);
+		const VkPhysicalDeviceMemoryProperties& get_memory_properties() const;
+		const VkPhysicalDeviceLimits& get_limits() const;
 
 		operator VkPhysicalDevice() const;
 		operator VkInstance() const;
@@ -101,6 +106,9 @@ namespace vk
 		// Exported device endpoints
 		PFN_vkCmdBeginConditionalRenderingEXT _vkCmdBeginConditionalRenderingEXT = nullptr;
 		PFN_vkCmdEndConditionalRenderingEXT _vkCmdEndConditionalRenderingEXT = nullptr;
+		PFN_vkSetDebugUtilsObjectNameEXT _vkSetDebugUtilsObjectNameEXT = nullptr;
+		PFN_vkQueueInsertDebugUtilsLabelEXT _vkQueueInsertDebugUtilsLabelEXT = nullptr;
+		PFN_vkCmdInsertDebugUtilsLabelEXT _vkCmdInsertDebugUtilsLabelEXT = nullptr;
 
 	public:
 		render_device() = default;
@@ -122,10 +130,13 @@ namespace vk
 		bool get_shader_stencil_export_support() const;
 		bool get_depth_bounds_support() const;
 		bool get_alpha_to_one_support() const;
+		bool get_anisotropic_filtering_support() const;
+		bool get_wide_lines_support() const;
 		bool get_conditional_render_support() const;
 		bool get_unrestricted_depth_range_support() const;
 		bool get_external_memory_host_support() const;
 		bool get_surface_capabilities_2_support() const;
+		bool get_debug_utils_support() const;
 
 		VkQueue get_present_queue() const;
 		VkQueue get_graphics_queue() const;

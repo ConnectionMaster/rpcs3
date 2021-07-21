@@ -2,6 +2,11 @@
 
 #include "util/types.hpp"
 
+#ifndef _MSC_VER
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Weffc++"
+#endif
+
 namespace stx
 {
 	template <typename T, usz Align = alignof(T), usz Size = sizeof(T)>
@@ -175,6 +180,8 @@ namespace stx
 		using under = decltype(int_or_enum());
 
 	public:
+		using enable_bitcopy = std::true_type;
+
 		se_t() noexcept = default;
 
 		constexpr se_t(type value) noexcept
@@ -204,8 +211,6 @@ namespace stx
 			m_data = to_data(value);
 			return *this;
 		}
-
-		using simple_type = simple_t<T>;
 
 		constexpr operator type() const noexcept
 		{
@@ -260,7 +265,7 @@ public:
 		template <typename T2, typename = decltype(+std::declval<const T2&>())>
 		constexpr bool operator==(const T2& rhs) const noexcept
 		{
-			using R = simple_t<T2>;
+			using R = std::common_type_t<T2>;
 
 			if constexpr ((std::is_integral_v<T> || std::is_enum_v<T>) && (std::is_integral_v<R> || std::is_enum_v<R>))
 			{
@@ -282,20 +287,11 @@ public:
 			return value() == rhs;
 		}
 
-#if __cpp_impl_three_way_comparison >= 201711
-#else
-		template <typename T2, typename = decltype(+std::declval<const T2&>())>
-		constexpr bool operator!=(const T2& rhs) const noexcept
-		{
-			return !operator==<T2>(rhs);
-		}
-#endif
-
 private:
 		template <typename T2>
 		static constexpr bool check_args_for_bitwise_op()
 		{
-			using R = simple_t<T2>;
+			using R = std::common_type_t<T2>;
 
 			if constexpr ((std::is_integral_v<T> || std::is_enum_v<T>) && (std::is_integral_v<R> || std::is_enum_v<R>))
 			{
@@ -467,3 +463,18 @@ public:
 		}
 	};
 }
+
+// Specializations
+
+template <typename T, bool Swap, usz Align, typename T2, bool Swap2, usz Align2>
+struct std::common_type<stx::se_t<T, Swap, Align>, stx::se_t<T2, Swap2, Align2>> : std::common_type<T, T2> {};
+
+template <typename T, bool Swap, usz Align, typename T2>
+struct std::common_type<stx::se_t<T, Swap, Align>, T2> : std::common_type<T, std::common_type_t<T2>> {};
+
+template <typename T, typename T2, bool Swap2, usz Align2>
+struct std::common_type<T, stx::se_t<T2, Swap2, Align2>> : std::common_type<std::common_type_t<T>, T2> {};
+
+#ifndef _MSC_VER
+#pragma GCC diagnostic pop
+#endif

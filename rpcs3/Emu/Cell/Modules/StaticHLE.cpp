@@ -2,6 +2,7 @@
 #include "StaticHLE.h"
 #include "Emu/Cell/PPUModule.h"
 #include "Emu/Cell/PPUOpcodes.h"
+#include "Emu/IdManager.h"
 
 LOG_CHANNEL(static_hle);
 
@@ -63,7 +64,6 @@ bool statichle_handler::load_patterns()
 
 		auto char_to_u8 = [&](u8 char1, u8 char2) -> u16
 		{
-			u8 hv, lv;
 			if (char1 == '.' && char2 == '.')
 				return 0xFFFF;
 
@@ -73,8 +73,8 @@ bool statichle_handler::load_patterns()
 				return -1;
 			}
 
-			hv = char1 > '9' ? char1 - 'A' + 10 : char1 - '0';
-			lv = char2 > '9' ? char2 - 'A' + 10 : char2 - '0';
+			const u8 hv = char1 > '9' ? char1 - 'A' + 10 : char1 - '0';
+			const u8 lv = char2 > '9' ? char2 - 'A' + 10 : char2 - '0';
 
 			return (hv << 4) | lv;
 		};
@@ -101,7 +101,6 @@ bool statichle_handler::load_patterns()
 
 u16 statichle_handler::gen_CRC16(const u8* data_p, usz length)
 {
-	unsigned char i;
 	unsigned int data;
 
 	if (length == 0)
@@ -110,7 +109,7 @@ u16 statichle_handler::gen_CRC16(const u8* data_p, usz length)
 	do
 	{
 		data = *data_p++;
-		for (i = 0; i < 8; i++)
+		for (unsigned char i = 0; i < 8; i++)
 		{
 			if ((crc ^ data) & 1)
 				crc = (crc >> 1) ^ POLY;
@@ -164,7 +163,7 @@ bool statichle_handler::check_against_patterns(vm::cptr<u8>& data, u32 size, u32
 		}
 
 		const auto sfunc   = &smodule->functions.at(pat.fnid);
-		const u32 target   = ppu_function_manager::func_addr(sfunc->index) + 4;
+		const u32 target   = g_fxo->get<ppu_function_manager>().func_addr(sfunc->index) + 4;
 
 		// write stub
 		vm::write32(addr, ppu_instructions::LIS(0, (target&0xFFFF0000)>>16));

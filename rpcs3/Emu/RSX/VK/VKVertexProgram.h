@@ -1,6 +1,5 @@
 #pragma once
-#include "../Common/VertexProgramDecompiler.h"
-#include "Emu/RSX/RSXVertexProgram.h"
+#include "../Program/VertexProgramDecompiler.h"
 #include "Utilities/Thread.h"
 #include "VulkanAPI.h"
 #include "VKProgramPipeline.h"
@@ -22,7 +21,7 @@ struct VKVertexDecompilerThread : public VertexProgramDecompiler
 
 	struct
 	{
-		bool emulate_conditional_rendering;
+		bool emulate_conditional_rendering{false};
 	}
 	m_device_props;
 

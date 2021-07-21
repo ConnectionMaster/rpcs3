@@ -8,6 +8,7 @@
 
 #include "Emu/System.h"
 #include "Emu/system_config.h"
+#include "Emu/system_utils.hpp"
 #include "Emu/Cell/Modules/cellSysutil.h"
 
 #include "util/yaml.hpp"
@@ -67,10 +68,6 @@ emu_settings::emu_settings()
 {
 }
 
-emu_settings::~emu_settings()
-{
-}
-
 bool emu_settings::Init()
 {
 	m_render_creator = new render_creator(this);
@@ -102,7 +99,7 @@ void emu_settings::LoadSettings(const std::string& title_id)
 	m_title_id = title_id;
 
 	// Create config path if necessary
-	fs::create_path(title_id.empty() ? fs::get_config_dir() : Emulator::GetCustomConfigDir());
+	fs::create_path(title_id.empty() ? fs::get_config_dir() : rpcs3::utils::get_custom_config_dir());
 
 	// Load default config
 	auto [default_config, default_error] = yaml_load(g_cfg_defaults);
@@ -143,8 +140,8 @@ void emu_settings::LoadSettings(const std::string& title_id)
 		// Otherwise we'll always trigger the "obsolete settings dialog" when editing custom configs.
 		ValidateSettings(true);
 
-		const std::string config_path_new = Emulator::GetCustomConfigPath(m_title_id);
-		const std::string config_path_old = Emulator::GetCustomConfigPath(m_title_id, true);
+		const std::string config_path_new = rpcs3::utils::get_custom_config_path(m_title_id);
+		const std::string config_path_old = rpcs3::utils::get_custom_config_path(m_title_id, true);
 		std::string custom_config_path;
 
 		if (fs::is_file(config_path_new))
@@ -268,8 +265,6 @@ bool emu_settings::ValidateSettings(bool cleanup)
 void emu_settings::SaveSettings()
 {
 	YAML::Emitter out;
-	emit_data(out, m_current_settings);
-
 	std::string config_name;
 
 	if (m_title_id.empty())
@@ -278,8 +273,12 @@ void emu_settings::SaveSettings()
 	}
 	else
 	{
-		config_name = Emulator::GetCustomConfigPath(m_title_id);
+		// VFS paths are being controlled mainly by the main config (needs manual modification for customization of custom configs)
+		m_current_settings.remove("VFS");
+		config_name = rpcs3::utils::get_custom_config_path(m_title_id);
 	}
+
+	emit_data(out, m_current_settings);
 
 	// Save config atomically
 	fs::pending_file temp(config_name);
@@ -342,7 +341,7 @@ void emu_settings::EnhanceComboBox(QComboBox* combobox, emu_settings_type type, 
 	}
 
 	// Since the QComboBox has localised strings, we can't just findText / findData, so we need to manually iterate through it to find our index
-	auto find_index = [&](const QString& value)
+	const auto find_index = [&](const QString& value)
 	{
 		for (int i = 0; i < combobox->count(); i++)
 		{
@@ -359,7 +358,7 @@ void emu_settings::EnhanceComboBox(QComboBox* combobox, emu_settings_type type, 
 
 	const std::string selected = GetSetting(type);
 	const QString selected_q = qstr(selected);
-	int index = -1;
+	int index;
 
 	if (is_ranged)
 	{
@@ -389,7 +388,7 @@ void emu_settings::EnhanceComboBox(QComboBox* combobox, emu_settings_type type, 
 
 	combobox->setCurrentIndex(index);
 
-	connect(combobox, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged), [=, this](int index)
+	connect(combobox, QOverload<int>::of(&QComboBox::currentIndexChanged), combobox, [this, is_ranged, combobox, type](int index)
 	{
 		if (is_ranged)
 		{
@@ -765,14 +764,14 @@ void emu_settings::SaveSelectedLibraries(const std::vector<std::string>& libs)
 	m_current_settings["Core"]["Libraries Control"] = libs;
 }
 
-QStringList emu_settings::GetSettingOptions(emu_settings_type type) const
+QStringList emu_settings::GetSettingOptions(emu_settings_type type)
 {
 	return cfg_adapter::get_options(const_cast<cfg_location&&>(settings_location[type]));
 }
 
 std::string emu_settings::GetSettingDefault(emu_settings_type type) const
 {
-	if (auto node = cfg_adapter::get_node(m_default_settings, settings_location[type]); node && node.IsScalar())
+	if (const auto node = cfg_adapter::get_node(m_default_settings, settings_location[type]); node && node.IsScalar())
 	{
 		return node.Scalar();
 	}
@@ -783,7 +782,7 @@ std::string emu_settings::GetSettingDefault(emu_settings_type type) const
 
 std::string emu_settings::GetSetting(emu_settings_type type) const
 {
-	if (auto node = cfg_adapter::get_node(m_current_settings, settings_location[type]); node && node.IsScalar())
+	if (const auto node = cfg_adapter::get_node(m_current_settings, settings_location[type]); node && node.IsScalar())
 	{
 		return node.Scalar();
 	}
@@ -792,7 +791,7 @@ std::string emu_settings::GetSetting(emu_settings_type type) const
 	return "";
 }
 
-void emu_settings::SetSetting(emu_settings_type type, const std::string& val)
+void emu_settings::SetSetting(emu_settings_type type, const std::string& val) const
 {
 	cfg_adapter::get_node(m_current_settings, settings_location[type]) = val;
 }

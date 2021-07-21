@@ -19,8 +19,10 @@
 #pragma GCC diagnostic ignored "-Wstrict-aliasing"
 #pragma GCC diagnostic ignored "-Wcast-qual"
 #ifndef __clang__
+#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
 #pragma GCC diagnostic ignored "-Wduplicated-branches"
 #endif
+#pragma GCC diagnostic ignored "-Wsign-compare"
 #include <stb_image.h>
 #include <stb_truetype.h>
 #pragma GCC diagnostic pop

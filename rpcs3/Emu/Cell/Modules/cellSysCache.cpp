@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "Emu/System.h"
+#include "Emu/system_utils.hpp"
 #include "Emu/VFS.h"
 #include "Emu/IdManager.h"
 #include "Emu/Cell/PPUModule.h"
@@ -32,7 +33,7 @@ extern lv2_fs_mount_point g_mp_sys_dev_hdd1;
 
 struct syscache_info
 {
-	const std::string cache_root = Emu.GetHdd1Dir() + "/caches/";
+	const std::string cache_root = rpcs3::utils::get_hdd1_dir() + "/caches/";
 
 	stx::init_mutex init;
 
@@ -68,7 +69,7 @@ struct syscache_info
 		}
 	}
 
-	void clear(bool remove_root) noexcept
+	void clear(bool remove_root) const noexcept
 	{
 		// Clear cache
 		if (!vfs::host::remove_all(cache_root + cache_id, cache_root, &g_mp_sys_dev_hdd1, remove_root))
