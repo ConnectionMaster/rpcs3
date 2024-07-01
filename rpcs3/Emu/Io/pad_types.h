@@ -41,7 +41,17 @@ enum class pad_button : u8
 	rs_x,
 	rs_y,
 
-	pad_button_max_enum
+	pad_button_max_enum,
+
+	// Special buttons for mouse input
+	mouse_button_1,
+	mouse_button_2,
+	mouse_button_3,
+	mouse_button_4,
+	mouse_button_5,
+	mouse_button_6,
+	mouse_button_7,
+	mouse_button_8,
 };
 
 u32 pad_button_offset(pad_button button);
@@ -134,6 +144,11 @@ enum
 	CELL_PAD_PCLASS_TYPE_DANCEMAT   = 0x04,
 	CELL_PAD_PCLASS_TYPE_NAVIGATION = 0x05,
 	CELL_PAD_PCLASS_TYPE_SKATEBOARD = 0x8001,
+
+	// these are used together with pad->is_fake_pad to capture input events for usbd/gem/move without conflicting with cellPad
+	CELL_PAD_FAKE_TYPE_GUNCON3      = 0xa000,
+
+	CELL_PAD_PCLASS_TYPE_MAX // last item
 };
 
 // Profile of a Standard Type Controller
@@ -497,6 +512,8 @@ struct Pad
 
 	bool ldd{false};
 	CellPadData ldd_data{};
+
+	bool is_fake_pad = false;
 
 	explicit Pad(pad_handler handler, u32 port_status, u32 device_capability, u32 device_type)
 		: m_pad_handler(handler)

@@ -35,6 +35,8 @@
 #include "shortcut_dialog.h"
 #include "system_cmd_dialog.h"
 #include "emulated_pad_settings_dialog.h"
+#include "basic_mouse_settings_dialog.h"
+#include "raw_mouse_settings_dialog.h"
 #include "welcome_dialog.h"
 
 #include <thread>
@@ -545,6 +547,7 @@ void main_window::BootElf()
 		"SELF files (EBOOT.BIN *.self);;"
 		"BOOT files (*BOOT.BIN);;"
 		"BIN files (*.bin);;"
+		"All executable files (*.SAVESTAT.zst *.SAVESTAT.gz *.SAVESTAT *.sprx *.SPRX *.self *.SELF *.bin *.BIN *.prx *.PRX *.elf *.ELF *.o *.O);;"
 		"All files (*.*)"),
 		Q_NULLPTR, QFileDialog::DontResolveSymlinks);
 
@@ -617,8 +620,8 @@ void main_window::BootSavestate()
 		stopped = true;
 	}
 
-	const QString file_path = QFileDialog::getOpenFileName(this, tr("Select Savestate To Boot"), qstr(fs::get_cache_dir() + "/savestates/"), tr(
-		"Savestate files (*.SAVESTAT *.SAVESTAT.gz);;"
+	const QString file_path = QFileDialog::getOpenFileName(this, tr("Select Savestate To Boot"), qstr(fs::get_config_dir() + "savestates/"), tr(
+		"Savestate files (*.SAVESTAT *.SAVESTAT.zst *.SAVESTAT.gz);;"
 		"All files (*.*)"),
 		Q_NULLPTR, QFileDialog::DontResolveSymlinks);
 
@@ -2750,6 +2753,28 @@ void main_window::CreateConnects()
 		dlg->show();
 	});
 
+	connect(ui->confGunCon3Act, &QAction::triggered, this, [this]
+	{
+		emulated_pad_settings_dialog* dlg = new emulated_pad_settings_dialog(emulated_pad_settings_dialog::pad_type::guncon3, this);
+		dlg->show();
+	});
+
+	connect(ui->actionBasic_Mouse, &QAction::triggered, this, [this]
+	{
+		basic_mouse_settings_dialog* dlg = new basic_mouse_settings_dialog(this);
+		dlg->show();
+	});
+
+#ifndef _WIN32
+	ui->actionRaw_Mouse->setVisible(false);
+#else
+	connect(ui->actionRaw_Mouse, &QAction::triggered, this, [this]
+	{
+		raw_mouse_settings_dialog* dlg = new raw_mouse_settings_dialog(this);
+		dlg->show();
+	});
+#endif
+
 	connect(ui->confCamerasAct, &QAction::triggered, this, [this]()
 	{
 		camera_settings_dialog dlg(this);
@@ -3745,7 +3770,7 @@ main_window::drop_type main_window::IsValidFile(const QMimeData& md, QStringList
 				type = drop_type::drop_rrc;
 			}
 			// The emulator allows to execute ANY filetype, just not from drag-and-drop because it is confusing to users
-			else if (path.toLower().endsWith(".savestat.gz") || suffix_lo == "savestat" || suffix_lo == "sprx" || suffix_lo == "self" || suffix_lo == "bin" || suffix_lo == "prx" || suffix_lo == "elf" || suffix_lo == "o")
+			else if (path.toLower().endsWith(".savestat.gz") || path.toLower().endsWith(".savestat.zst") || suffix_lo == "savestat" || suffix_lo == "sprx" || suffix_lo == "self" || suffix_lo == "bin" || suffix_lo == "prx" || suffix_lo == "elf" || suffix_lo == "o")
 			{
 				type = drop_type::drop_game;
 			}

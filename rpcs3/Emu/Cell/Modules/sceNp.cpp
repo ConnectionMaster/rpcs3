@@ -744,7 +744,7 @@ error_code sceNpDrmIsAvailable(ppu_thread& ppu, vm::cptr<u8> k_licensee_addr, vm
 	lv2_obj::sleep(ppu);
 
 	const auto ret = npDrmIsAvailable(k_licensee_addr, drm_path);
-	lv2_sleep(50'000, &ppu);
+	lv2_sleep(25'000, &ppu);
 
 	return ret;
 }
@@ -1169,8 +1169,8 @@ error_code sceNpBasicSendMessageGui(ppu_thread& ppu, vm::cptr<SceNpBasicMessageD
 
 	if (msg)
 	{
-		sceNp.notice("sceNpBasicSendMessageGui: msgId: %d, mainType: %d, subType: %d, msgFeatures: %d, count: %d", msg->msgId, msg->mainType, msg->subType, msg->msgFeatures, msg->count);
-		for (u32 i = 0; i < msg->count; i++)
+		sceNp.notice("sceNpBasicSendMessageGui: msgId: %d, mainType: %d, subType: %d, msgFeatures: %d, count: %d, npids: *0x%x", msg->msgId, msg->mainType, msg->subType, msg->msgFeatures, msg->count, msg->npids);
+		for (u32 i = 0; i < msg->count && msg->npids; i++)
 		{
 			sceNp.trace("sceNpBasicSendMessageGui: NpId[%d] = %s", i, static_cast<char*>(&msg->npids[i].handle.data[0]));
 		}
@@ -1338,9 +1338,12 @@ error_code sceNpBasicSendMessageGui(ppu_thread& ppu, vm::cptr<SceNpBasicMessageD
 		.msgFeatures = msg->msgFeatures};
 	std::set<std::string> npids;
 
-	for (u32 i = 0; i < msg->count; i++)
+	if (msg->npids)
 	{
-		npids.insert(std::string(msg->npids[i].handle.data));
+		for (u32 i = 0; i < msg->count; i++)
+		{
+			npids.insert(std::string(msg->npids[i].handle.data));
+		}
 	}
 
 	if (msg->subject)
@@ -2967,7 +2970,7 @@ error_code sceNpCustomMenuRegisterActions(vm::cptr<SceNpCustomMenu> menu, vm::pt
 
 	for (u32 i = 0; i < menu->numActions; i++)
 	{
-		if (!menu->actions[i].name)
+		if (!menu->actions || !menu->actions[i].name)
 		{
 			return SCE_NP_CUSTOM_MENU_ERROR_INVALID_ARGUMENT;
 		}
@@ -3896,7 +3899,7 @@ error_code sceNpManagerGetAvatarUrl(vm::ptr<SceNpAvatarUrl> avatarUrl)
 
 error_code sceNpManagerGetMyLanguages(vm::ptr<SceNpMyLanguages> myLanguages)
 {
-	sceNp.warning("sceNpManagerGetMyLanguages(myLanguages=*0x%x)", myLanguages);
+	sceNp.trace("sceNpManagerGetMyLanguages(myLanguages=*0x%x)", myLanguages);
 
 	auto& nph = g_fxo->get<named_thread<np::np_handler>>();
 
@@ -5834,8 +5837,8 @@ error_code scenp_score_get_ranking_by_npid(s32 transId, SceNpScoreBoardId boardI
 
 	std::vector<std::pair<SceNpId, s32>> npid_vec;
 
-	static constexpr bool is_npid     = std::is_same<T, vm::cptr<SceNpId>>::value;
-	static constexpr bool is_npidpcid = std::is_same<T, vm::cptr<SceNpScoreNpIdPcId>>::value;
+	static constexpr bool is_npid     = std::is_same_v<T, vm::cptr<SceNpId>>;
+	static constexpr bool is_npidpcid = std::is_same_v<T, vm::cptr<SceNpScoreNpIdPcId>>;
 	static_assert(is_npid || is_npidpcid, "T should be vm::cptr<SceNpId> or vm::cptr<SceNpScoreNpIdPcId>");
 
 	if constexpr (is_npid)

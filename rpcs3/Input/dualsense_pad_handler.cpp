@@ -2,7 +2,11 @@
 #include "dualsense_pad_handler.h"
 #include "Emu/Io/pad_config.h"
 
+#include <limits>
+
 LOG_CHANNEL(dualsense_log, "DualSense");
+
+using namespace reports;
 
 template <>
 void fmt_class_string<DualSenseDevice::DualSenseDataMode>::format(std::string& out, u64 arg)
@@ -21,83 +25,12 @@ void fmt_class_string<DualSenseDevice::DualSenseDataMode>::format(std::string& o
 
 namespace
 {
-	constexpr u32 DUALSENSE_ACC_RES_PER_G = 8192;
-	constexpr u32 DUALSENSE_GYRO_RES_PER_DEG_S = 86; // technically this could be 1024, but keeping it at 86 keeps us within 16 bits of precision
-	constexpr u32 DUALSENSE_CALIBRATION_REPORT_SIZE = 41;
-	constexpr u32 DUALSENSE_VERSION_REPORT_SIZE = 64;
-	constexpr u32 DUALSENSE_BLUETOOTH_REPORT_SIZE = 78;
-	constexpr u32 DUALSENSE_USB_REPORT_SIZE = 63;
-	constexpr u32 DUALSENSE_COMMON_REPORT_SIZE = 47;
-	constexpr u32 DUALSENSE_INPUT_REPORT_GYRO_X_OFFSET = 15;
-
 	constexpr id_pair SONY_DUALSENSE_ID_0 = {0x054C, 0x0CE6}; // DualSense
 	constexpr id_pair SONY_DUALSENSE_ID_1 = {0x054C, 0x0DF2}; // DualSense Edge
-
-	enum
-	{
-		VALID_FLAG_0_COMPATIBLE_VIBRATION            = 0x01,
-		VALID_FLAG_0_HAPTICS_SELECT                  = 0x02,
-		VALID_FLAG_1_MIC_MUTE_LED_CONTROL_ENABLE     = 0x01,
-		VALID_FLAG_1_POWER_SAVE_CONTROL_ENABLE       = 0x02,
-		VALID_FLAG_1_LIGHTBAR_CONTROL_ENABLE         = 0x04,
-		VALID_FLAG_1_RELEASE_LEDS                    = 0x08,
-		VALID_FLAG_1_PLAYER_INDICATOR_CONTROL_ENABLE = 0x10,
-		VALID_FLAG_2_LIGHTBAR_SETUP_CONTROL_ENABLE   = 0x02,
-		VALID_FLAG_2_IMPROVED_RUMBLE_EMULATION       = 0x04,
-		POWER_SAVE_CONTROL_MIC_MUTE                  = 0x10,
-		LIGHTBAR_SETUP_LIGHT_ON                      = 0x01,
-		LIGHTBAR_SETUP_LIGHT_OUT                     = 0x02,
-	};
-
-	struct output_report_common
-	{
-		u8 valid_flag_0;
-		u8 valid_flag_1;
-		u8 motor_right;
-		u8 motor_left;
-		u8 headphone_volume;
-		u8 speaker_volume;
-		u8 microphone_volume;
-		u8 audio_enable_bits;
-		u8 mute_button_led;
-		u8 power_save_control;
-		u8 right_trigger_effect[11];
-		u8 left_trigger_effect[11];
-		u8 reserved[6];
-		u8 valid_flag_2;
-		u8 reserved_3[2];
-		u8 lightbar_setup;
-		u8 led_brightness;
-		u8 player_leds;
-		u8 lightbar_r;
-		u8 lightbar_g;
-		u8 lightbar_b;
-	};
-
-	struct output_report_bt
-	{
-		u8 report_id; // 0x31
-		u8 seq_tag;
-		u8 tag;
-		output_report_common common;
-		u8 reserved[24];
-		u8 crc32[4];
-	};
-
-	struct output_report_usb
-	{
-		u8 report_id; // 0x02
-		output_report_common common;
-		u8 reserved[15];
-	};
-
-	static_assert(sizeof(struct output_report_common) == DUALSENSE_COMMON_REPORT_SIZE);
-	static_assert(sizeof(struct output_report_bt) == DUALSENSE_BLUETOOTH_REPORT_SIZE);
-	static_assert(sizeof(struct output_report_usb) == DUALSENSE_USB_REPORT_SIZE);
 }
 
-dualsense_pad_handler::dualsense_pad_handler(bool emulation)
-    : hid_pad_handler<DualSenseDevice>(pad_handler::dualsense, emulation, {SONY_DUALSENSE_ID_0, SONY_DUALSENSE_ID_1})
+dualsense_pad_handler::dualsense_pad_handler()
+    : hid_pad_handler<DualSenseDevice>(pad_handler::dualsense, {SONY_DUALSENSE_ID_0, SONY_DUALSENSE_ID_1})
 {
 	// Unique names for the config files and our pad settings dialog
 	button_list =
@@ -185,7 +118,7 @@ void dualsense_pad_handler::check_add_device(hid_device* hidDevice, std::string_
 		return;
 	}
 
-	std::array<u8, 64> buf{};
+	std::array<u8, std::max(DUALSENSE_FIRMWARE_REPORT_SIZE, DUALSENSE_PAIRING_REPORT_SIZE)> buf{};
 	buf[0] = 0x09;
 
 	// This will give us the bluetooth mac address of the device, regardless if we are on wired or bluetooth.
@@ -222,8 +155,7 @@ void dualsense_pad_handler::check_add_device(hid_device* hidDevice, std::string_
 	if (!get_calibration_data(device))
 	{
 		dualsense_log.error("check_add_device: get_calibration_data failed!");
-		hid_close(hidDevice);
-		device->hidDevice = nullptr;
+		device->close();
 		return;
 	}
 
@@ -234,8 +166,8 @@ void dualsense_pad_handler::check_add_device(hid_device* hidDevice, std::string_
 	buf = {};
 	buf[0] = 0x20;
 
-	res = hid_get_feature_report(hidDevice, buf.data(), DUALSENSE_VERSION_REPORT_SIZE);
-	if (res != DUALSENSE_VERSION_REPORT_SIZE || buf[0] != 0x20) // Old versions return 65, newer versions return 64
+	res = hid_get_feature_report(hidDevice, buf.data(), DUALSENSE_FIRMWARE_REPORT_SIZE);
+	if (res != DUALSENSE_FIRMWARE_REPORT_SIZE || buf[0] != 0x20) // Old versions return 65, newer versions return 64
 	{
 		dualsense_log.error("check_add_device: hid_get_feature_report 0x20 failed! Could not retrieve firmware version! result=%d, buf[0]=0x%x, error=%s", res, buf[0], hid_error(hidDevice));
 	}
@@ -249,8 +181,7 @@ void dualsense_pad_handler::check_add_device(hid_device* hidDevice, std::string_
 	if (hid_set_nonblocking(hidDevice, 1) == -1)
 	{
 		dualsense_log.error("check_add_device: hid_set_nonblocking failed! Reason: %s", hid_error(hidDevice));
-		hid_close(hidDevice);
-		device->hidDevice = nullptr;
+		device->close();
 		return;
 	}
 
@@ -317,6 +248,8 @@ void dualsense_pad_handler::init_config(cfg_pad* cfg)
 	cfg->pressure_intensity_button.def = ::at32(button_list, DualSenseKeyCodes::None);
 
 	// Set default misc variables
+	cfg->lstick_anti_deadzone.def = static_cast<u32>(0.13 * thumb_max); // 13%
+	cfg->rstick_anti_deadzone.def = static_cast<u32>(0.13 * thumb_max); // 13%
 	cfg->lstickdeadzone.def    = 40; // between 0 and 255
 	cfg->rstickdeadzone.def    = 40; // between 0 and 255
 	cfg->ltriggerthreshold.def = 0;  // between 0 and 255
@@ -357,34 +290,36 @@ dualsense_pad_handler::DataStatus dualsense_pad_handler::get_data(DualSenseDevic
 		return DataStatus::NoNewData;
 
 	u8 offset = 0;
+
 	switch (buf[0])
 	{
 	case 0x01:
 	{
-		if (res == DUALSENSE_BLUETOOTH_REPORT_SIZE)
+		if (res == sizeof(dualsense_input_report_bt))
 		{
 			device->data_mode     = DualSenseDevice::DualSenseDataMode::Simple;
 			device->bt_controller = true;
-			offset = 1;
 		}
 		else
 		{
 			device->data_mode     = DualSenseDevice::DualSenseDataMode::Enhanced;
 			device->bt_controller = false;
-			offset = 1;
 		}
+
+		offset = offsetof(dualsense_input_report_usb, common);
 		break;
 	}
 	case 0x31:
 	{
 		device->data_mode     = DualSenseDevice::DualSenseDataMode::Enhanced;
 		device->bt_controller = true;
-		offset = 2;
+
+		offset = offsetof(dualsense_input_report_bt, common);
 
 		const u8 btHdr = 0xA1;
 		const u32 crcHdr = CRCPP::CRC::Calculate(&btHdr, 1, crcTable);
-		const u32 crcCalc = CRCPP::CRC::Calculate(buf.data(), (DUALSENSE_BLUETOOTH_REPORT_SIZE - 4), crcTable, crcHdr);
-		const u32 crcReported = read_u32(&buf[DUALSENSE_BLUETOOTH_REPORT_SIZE - 4]);
+		const u32 crcCalc = CRCPP::CRC::Calculate(buf.data(), offsetof(dualsense_input_report_bt, crc32), crcTable, crcHdr);
+		const u32 crcReported = read_u32(&buf[offsetof(dualsense_input_report_bt, crc32)]);
 		if (crcCalc != crcReported)
 		{
 			dualsense_log.warning("Data packet CRC check failed, ignoring! Received 0x%x, Expected 0x%x", crcReported, crcCalc);
@@ -398,7 +333,7 @@ dualsense_pad_handler::DataStatus dualsense_pad_handler::get_data(DualSenseDevic
 
 	if (device->has_calib_data)
 	{
-		int calib_offset = offset + DUALSENSE_INPUT_REPORT_GYRO_X_OFFSET;
+		int calib_offset = offset + offsetof(dualsense_input_report_common, gyro);
 		for (int i = 0; i < CalibIndex::COUNT; ++i)
 		{
 			const s16 raw_value = read_s16(&buf[calib_offset]);
@@ -408,10 +343,12 @@ dualsense_pad_handler::DataStatus dualsense_pad_handler::get_data(DualSenseDevic
 		}
 	}
 
+	std::memcpy(&device->report, &buf[offset], sizeof(dualsense_input_report_common));
+
 	// For now let's only get battery info in enhanced mode
 	if (device->data_mode == DualSenseDevice::DualSenseDataMode::Enhanced)
 	{
-		const u8 battery_state = buf[offset + 52];
+		const u8 battery_state = device->report.status;
 		const u8 battery_value = battery_state & 0x0F; // 10% per unit, starting with 0-9%. So 100% equals unit 10
 		const u8 charge_info = (battery_state & 0xF0) >> 4;
 
@@ -437,7 +374,6 @@ dualsense_pad_handler::DataStatus dualsense_pad_handler::get_data(DualSenseDevic
 		}
 	}
 
-	memcpy(device->padData.data(), &buf[offset], device->padData.size());
 	return DataStatus::NewData;
 }
 
@@ -496,31 +432,12 @@ bool dualsense_pad_handler::get_calibration_data(DualSenseDevice* dualsense_devi
 	dualsense_device->calib_data[CalibIndex::YAW].bias   = read_s16(&buf[3]);
 	dualsense_device->calib_data[CalibIndex::ROLL].bias  = read_s16(&buf[5]);
 
-	s16 pitch_plus, pitch_minus, roll_plus, roll_minus, yaw_plus, yaw_minus;
-
-	// TODO: This was copied from DS4. Find out if it applies here.
-	// Check for calibration data format
-	// It's going to be either alternating +/- or +++---
-	if (read_s16(&buf[9]) < 0 && read_s16(&buf[7]) > 0)
-	{
-		// Wired mode for OEM controllers
-		pitch_plus  = read_s16(&buf[7]);
-		pitch_minus = read_s16(&buf[9]);
-		yaw_plus    = read_s16(&buf[11]);
-		yaw_minus   = read_s16(&buf[13]);
-		roll_plus   = read_s16(&buf[15]);
-		roll_minus  = read_s16(&buf[17]);
-	}
-	else
-	{
-		// Bluetooth mode and wired mode for some 3rd party controllers
-		pitch_plus  = read_s16(&buf[7]);
-		yaw_plus    = read_s16(&buf[9]);
-		roll_plus   = read_s16(&buf[11]);
-		pitch_minus = read_s16(&buf[13]);
-		yaw_minus   = read_s16(&buf[15]);
-		roll_minus  = read_s16(&buf[17]);
-	}
+	const s16 pitch_plus  = read_s16(&buf[7]);
+	const s16 pitch_minus = read_s16(&buf[9]);
+	const s16 yaw_plus    = read_s16(&buf[11]);
+	const s16 yaw_minus   = read_s16(&buf[13]);
+	const s16 roll_plus   = read_s16(&buf[15]);
+	const s16 roll_minus  = read_s16(&buf[17]);
 
 	// Confirm correctness. Need confirmation with dongle with no active controller
 	if (pitch_plus <= 0 || yaw_plus <= 0 || roll_plus <= 0 ||
@@ -528,7 +445,6 @@ bool dualsense_pad_handler::get_calibration_data(DualSenseDevice* dualsense_devi
 	{
 		dualsense_log.error("get_calibration_data: calibration data check failed! pitch_plus=%d, pitch_minus=%d, roll_plus=%d, roll_minus=%d, yaw_plus=%d, yaw_minus=%d",
 		    pitch_plus, pitch_minus, roll_plus, roll_minus, yaw_plus, yaw_minus);
-		return false;
 	}
 
 	const s32 gyro_speed_scale = read_s16(&buf[19]) + read_s16(&buf[21]);
@@ -567,12 +483,16 @@ bool dualsense_pad_handler::get_calibration_data(DualSenseDevice* dualsense_devi
 
 	// Make sure data 'looks' valid, dongle will report invalid calibration data with no controller connected
 
-	for (const CalibData& data : dualsense_device->calib_data)
+	for (size_t i = 0; i < dualsense_device->calib_data.size(); i++)
 	{
+		CalibData& data = dualsense_device->calib_data[i];
+
 		if (data.sens_denom == 0)
 		{
-			dualsense_log.error("get_calibration_data: Failure: sens_denom == 0");
-			return false;
+			dualsense_log.error("GetCalibrationData: Invalid accelerometer calibration data for axis %d, disabling calibration.", i);
+			data.bias = 0;
+			data.sens_numer = 4 * DUALSENSE_ACC_RES_PER_G;
+			data.sens_denom = std::numeric_limits<s16>::max();
 		}
 	}
 
@@ -647,8 +567,7 @@ PadHandlerBase::connection dualsense_pad_handler::update_connection(const std::s
 	if (get_data(dualsense_dev) == DataStatus::ReadError)
 	{
 		// this also can mean disconnected, either way deal with it on next loop and reconnect
-		hid_close(dualsense_dev->hidDevice);
-		dualsense_dev->hidDevice = nullptr;
+		dualsense_dev->close();
 
 		return connection::no_data;
 	}
@@ -668,19 +587,19 @@ void dualsense_pad_handler::get_extended_info(const pad_ensemble& binding)
 	pad->m_battery_level = dualsense_device->battery_level;
 	pad->m_cable_state   = dualsense_device->cable_state;
 
-	const std::array<u8, 64>& buf = dualsense_device->padData;
+	const dualsense_input_report_common& input = dualsense_device->report;
 
 	// these values come already calibrated, all we need to do is convert to ds3 range
 
 	// gyroY is yaw, which is all that we need
-	//f32 gyroX = static_cast<s16>((buf[16] << 8) | buf[15]) / static_cast<f32>(DUALSENSE_GYRO_RES_PER_DEG_S) * -1.f;
-	f32 gyroY = static_cast<s16>((buf[18] << 8) | buf[17]) / static_cast<f32>(DUALSENSE_GYRO_RES_PER_DEG_S) * -1.f;
-	//f32 gyroZ = static_cast<s16>((buf[20] << 8) | buf[19]) / static_cast<f32>(DUALSENSE_GYRO_RES_PER_DEG_S) * -1.f;
+	//f32 gyroX = static_cast<s16>(input.gyro[0]) / static_cast<f32>(DUALSENSE_GYRO_RES_PER_DEG_S) * -1.f;
+	f32 gyroY = static_cast<s16>(input.gyro[1]) / static_cast<f32>(DUALSENSE_GYRO_RES_PER_DEG_S) * -1.f;
+	//f32 gyroZ = static_cast<s16>(input.gyro[2]) / static_cast<f32>(DUALSENSE_GYRO_RES_PER_DEG_S) * -1.f;
 
 	// accel
-	f32 accelX = static_cast<s16>((buf[22] << 8) | buf[21]) / static_cast<f32>(DUALSENSE_ACC_RES_PER_G) * -1;
-	f32 accelY = static_cast<s16>((buf[24] << 8) | buf[23]) / static_cast<f32>(DUALSENSE_ACC_RES_PER_G) * -1;
-	f32 accelZ = static_cast<s16>((buf[26] << 8) | buf[25]) / static_cast<f32>(DUALSENSE_ACC_RES_PER_G) * -1;
+	f32 accelX = static_cast<s16>(input.accel[0]) / static_cast<f32>(DUALSENSE_ACC_RES_PER_G) * -1;
+	f32 accelY = static_cast<s16>(input.accel[1]) / static_cast<f32>(DUALSENSE_ACC_RES_PER_G) * -1;
+	f32 accelZ = static_cast<s16>(input.accel[2]) / static_cast<f32>(DUALSENSE_ACC_RES_PER_G) * -1;
 
 	// now just use formula from ds3
 	accelX = accelX * 113 + 512;
@@ -703,30 +622,30 @@ std::unordered_map<u64, u16> dualsense_pad_handler::get_button_values(const std:
 	if (!dualsense_dev)
 		return keyBuffer;
 
-	const std::array<u8, 64>& buf = dualsense_dev->padData;
+	const dualsense_input_report_common& input = dualsense_dev->report;
 
 	const bool is_simple_mode = dualsense_dev->data_mode == DualSenseDevice::DualSenseDataMode::Simple;
 
 	// Left Stick X Axis
-	keyBuffer[DualSenseKeyCodes::LSXNeg] = Clamp0To255((127.5f - buf[0]) * 2.0f);
-	keyBuffer[DualSenseKeyCodes::LSXPos] = Clamp0To255((buf[0] - 127.5f) * 2.0f);
+	keyBuffer[DualSenseKeyCodes::LSXNeg] = Clamp0To255((127.5f - input.x) * 2.0f);
+	keyBuffer[DualSenseKeyCodes::LSXPos] = Clamp0To255((input.x - 127.5f) * 2.0f);
 
 	// Left Stick Y Axis (Up is the negative for some reason)
-	keyBuffer[DualSenseKeyCodes::LSYNeg] = Clamp0To255((buf[1] - 127.5f) * 2.0f);
-	keyBuffer[DualSenseKeyCodes::LSYPos] = Clamp0To255((127.5f - buf[1]) * 2.0f);
+	keyBuffer[DualSenseKeyCodes::LSYNeg] = Clamp0To255((input.y - 127.5f) * 2.0f);
+	keyBuffer[DualSenseKeyCodes::LSYPos] = Clamp0To255((127.5f - input.y) * 2.0f);
 
 	// Right Stick X Axis
-	keyBuffer[DualSenseKeyCodes::RSXNeg] = Clamp0To255((127.5f - buf[2]) * 2.0f);
-	keyBuffer[DualSenseKeyCodes::RSXPos] = Clamp0To255((buf[2] - 127.5f) * 2.0f);
+	keyBuffer[DualSenseKeyCodes::RSXNeg] = Clamp0To255((127.5f - input.rx) * 2.0f);
+	keyBuffer[DualSenseKeyCodes::RSXPos] = Clamp0To255((input.rx - 127.5f) * 2.0f);
 
 	// Right Stick Y Axis (Up is the negative for some reason)
-	keyBuffer[DualSenseKeyCodes::RSYNeg] = Clamp0To255((buf[3] - 127.5f) * 2.0f);
-	keyBuffer[DualSenseKeyCodes::RSYPos] = Clamp0To255((127.5f - buf[3]) * 2.0f);
+	keyBuffer[DualSenseKeyCodes::RSYNeg] = Clamp0To255((input.ry - 127.5f) * 2.0f);
+	keyBuffer[DualSenseKeyCodes::RSYPos] = Clamp0To255((127.5f - input.ry) * 2.0f);
 
-	keyBuffer[DualSenseKeyCodes::L2] = buf[is_simple_mode ? 7 : 4];
-	keyBuffer[DualSenseKeyCodes::R2] = buf[is_simple_mode ? 8 : 5];
+	keyBuffer[DualSenseKeyCodes::L2] = is_simple_mode ? input.buttons[0] : input.z;
+	keyBuffer[DualSenseKeyCodes::R2] = is_simple_mode ? input.buttons[1] : input.rz;
 
-	u8 data = buf[is_simple_mode ? 4 : 7] & 0xf;
+	u8 data = (is_simple_mode ? input.z : input.buttons[0]) & 0xf;
 	switch (data)
 	{
 	case 0x08: // none pressed
@@ -787,13 +706,13 @@ std::unordered_map<u64, u16> dualsense_pad_handler::get_button_values(const std:
 		fmt::throw_exception("dualsense dpad state encountered unexpected input");
 	}
 
-	data = buf[is_simple_mode ? 4 : 7] >> 4;
+	data = (is_simple_mode ? input.z : input.buttons[0]) >> 4;
 	keyBuffer[DualSenseKeyCodes::Square]   = ((data & 0x01) != 0) ? 255 : 0;
 	keyBuffer[DualSenseKeyCodes::Cross]    = ((data & 0x02) != 0) ? 255 : 0;
 	keyBuffer[DualSenseKeyCodes::Circle]   = ((data & 0x04) != 0) ? 255 : 0;
 	keyBuffer[DualSenseKeyCodes::Triangle] = ((data & 0x08) != 0) ? 255 : 0;
 
-	data = buf[is_simple_mode ? 5 : 8];
+	data = (is_simple_mode ? input.rz : input.buttons[1]);
 	keyBuffer[DualSenseKeyCodes::L1]      = ((data & 0x01) != 0) ? 255 : 0;
 	keyBuffer[DualSenseKeyCodes::R1]      = ((data & 0x02) != 0) ? 255 : 0;
 	//keyBuffer[DualSenseKeyCodes::L2]      = ((data & 0x04) != 0) ? 255 : 0; // active when L2 is pressed
@@ -803,7 +722,7 @@ std::unordered_map<u64, u16> dualsense_pad_handler::get_button_values(const std:
 	keyBuffer[DualSenseKeyCodes::L3]      = ((data & 0x40) != 0) ? 255 : 0;
 	keyBuffer[DualSenseKeyCodes::R3]      = ((data & 0x80) != 0) ? 255 : 0;
 
-	data = buf[is_simple_mode ? 6 : 9];
+	data = (is_simple_mode ? input.seq_number : input.buttons[2]);
 	keyBuffer[DualSenseKeyCodes::PSButton] = ((data & 0x01) != 0) ? 255 : 0;
 	keyBuffer[DualSenseKeyCodes::TouchPad] = ((data & 0x02) != 0) ? 255 : 0;
 	keyBuffer[DualSenseKeyCodes::Mic]      = ((data & 0x04) != 0) ? 255 : 0;
@@ -840,7 +759,10 @@ dualsense_pad_handler::~dualsense_pad_handler()
 			// Disable vibration
 			controller.second->small_motor = 0;
 			controller.second->large_motor = 0;
-			controller.second->release_leds = true;
+
+			// Turns off the lights (disabled due to user complaints)
+			//controller.second->release_leds = true;
+
 			send_output_report(controller.second.get());
 		}
 	}
@@ -855,7 +777,7 @@ int dualsense_pad_handler::send_output_report(DualSenseDevice* device)
 	if (config == nullptr)
 		return -2; // hid_write returns -1 on error
 
-	output_report_common common{};
+	dualsense_output_report_common common{};
 
 	// Only initialize lightbar in the first output report. The controller didn't seem to update the player LEDs correctly otherwise. (Might be placebo)
 	if (device->init_lightbar)
@@ -865,7 +787,7 @@ int dualsense_pad_handler::send_output_report(DualSenseDevice* device)
 		device->lightbar_on_old = true;
 
 		common.valid_flag_2 |= VALID_FLAG_2_LIGHTBAR_SETUP_CONTROL_ENABLE;
-		common.lightbar_setup = LIGHTBAR_SETUP_LIGHT_OUT; // Fade light out.
+		common.lightbar_setup = LIGHTBAR_SETUP_LIGHT_OFF; // Fade light out.
 	}
 	else if (device->release_leds)
 	{
@@ -939,27 +861,24 @@ int dualsense_pad_handler::send_output_report(DualSenseDevice* device)
 		const u8 seq_tag = (device->bt_sequence << 4) | 0x0;
 		if (++device->bt_sequence >= 16) device->bt_sequence = 0;
 
-		output_report_bt report{};
+		dualsense_output_report_bt report{};
 		report.report_id = 0x31; // report id for bluetooth
 		report.seq_tag   = seq_tag;
 		report.tag       = 0x10; // magic number
-		report.common    = common;
+		report.common    = std::move(common);
 
 		const u8 btHdr    = 0xA2;
 		const u32 crcHdr  = CRCPP::CRC::Calculate(&btHdr, 1, crcTable);
-		const u32 crcCalc = CRCPP::CRC::Calculate(&report.report_id, (DUALSENSE_BLUETOOTH_REPORT_SIZE - 4), crcTable, crcHdr);
+		const u32 crcCalc = CRCPP::CRC::Calculate(&report.report_id, (sizeof(dualsense_output_report_bt) - 4), crcTable, crcHdr);
 
-		report.crc32[0] = (crcCalc >> 0) & 0xFF;
-		report.crc32[1] = (crcCalc >> 8) & 0xFF;
-		report.crc32[2] = (crcCalc >> 16) & 0xFF;
-		report.crc32[3] = (crcCalc >> 24) & 0xFF;
+		write_to_ptr(report.crc32, crcCalc);
 
-		return hid_write(device->hidDevice, &report.report_id, DUALSENSE_BLUETOOTH_REPORT_SIZE);
+		return hid_write(device->hidDevice, &report.report_id, sizeof(dualsense_output_report_bt));
 	}
 
-	output_report_usb report{};
+	dualsense_output_report_usb report{};
 	report.report_id = 0x02; // report id for usb
-	report.common    = common;
+	report.common    = std::move(common);
 
 	return hid_write(device->hidDevice, &report.report_id, DUALSENSE_USB_REPORT_SIZE);
 }

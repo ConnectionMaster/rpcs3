@@ -72,9 +72,7 @@ class pad_settings_dialog : public QDialog
 		id_reset_parameters,
 		id_blacklist,
 		id_refresh,
-		id_add_config_file,
-		id_ok,
-		id_cancel
+		id_add_config_file
 	};
 
 	struct pad_button
@@ -205,7 +203,7 @@ private:
 	void ReloadButtons();
 
 	/** Repaints a stick deadzone preview label */
-	void RepaintPreviewLabel(QLabel* l, int deadzone, int desired_width, int x, int y, int squircle, double multiplier) const;
+	void RepaintPreviewLabel(QLabel* l, int deadzone, int anti_deadzone, int desired_width, int x, int y, int squircle, double multiplier) const;
 
 	QString GetLocalizedPadHandler(const QString& original, pad_handler handler);
 	QString GetLocalizedPadName(pad_handler handler, const QString& original, usz index);

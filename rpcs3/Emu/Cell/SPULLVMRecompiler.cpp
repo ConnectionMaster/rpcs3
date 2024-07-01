@@ -5,6 +5,8 @@
 #include "Emu/system_config.h"
 #include "Emu/IdManager.h"
 #include "Emu/Cell/timers.hpp"
+#include "Emu/Memory/vm_reservation.h"
+#include "Emu/RSX/Core/RSXReservationLock.hpp"
 #include "Crypto/sha1.h"
 #include "Utilities/JIT.h"
 
@@ -35,6 +37,7 @@ const extern spu_decoder<spu_iflag> g_spu_iflag;
 #pragma GCC diagnostic ignored "-Wold-style-cast"
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #pragma GCC diagnostic ignored "-Wmissing-noreturn"
+#pragma GCC diagnostic ignored "-Wstrict-aliasing"
 #endif
 #include <llvm/ADT/PostOrderIterator.h>
 #include <llvm/Analysis/PostDominators.h>
@@ -503,8 +506,6 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 			return result;
 		}
 
-		ensure(!absolute);
-
 		auto& result = m_blocks[target].block;
 
 		if (!result)
@@ -534,6 +535,14 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 	llvm::Value* _ptr(llvm::Value* base, u32 offset)
 	{
 		return m_ir->CreateGEP(get_type<u8>(), base, m_ir->getInt64(offset));
+	}
+
+	template <typename T = u8>
+	llvm::Value* _ptr(llvm::Value* base, llvm::Value* offset)
+	{
+		const auto off = m_ir->CreateGEP(get_type<u8>(), base, offset);
+		const auto ptr = m_ir->CreateBitCast(off, get_type<T*>());
+		return ptr;
 	}
 
 	template <typename T, typename... Args>
@@ -1080,6 +1089,379 @@ class spu_llvm_recompiler : public spu_recompiler_base, public cpu_translator
 		m_ir->SetInsertPoint(_body);
 	}
 
+	void putllc16_pattern(const spu_program& /*prog*/, utils::address_range range)
+	{
+		// Prevent store elimination
+		m_block->store_context_ctr[s_reg_mfc_eal]++;
+		m_block->store_context_ctr[s_reg_mfc_lsa]++;
+		m_block->store_context_ctr[s_reg_mfc_tag]++;
+		m_block->store_context_ctr[s_reg_mfc_size]++;
+
+		static const auto on_fail = [](spu_thread* _spu, u32 addr)
+		{
+			if (const u32 raddr = _spu->raddr)
+			{
+				// Last check for event before we clear the reservation
+				if (~_spu->ch_events.load().events & SPU_EVENT_LR)
+				{
+					if (raddr == addr)
+					{
+						_spu->set_events(SPU_EVENT_LR);
+					}
+					else
+					{
+						_spu->get_events(SPU_EVENT_LR);
+					}
+				}
+
+				_spu->raddr = 0;
+			}
+		};
+
+		const union putllc16_info
+		{
+			u32 data;
+			bf_t<u32, 30, 2> type;
+			bf_t<u32, 29, 1> runtime16_select;
+			bf_t<u32, 28, 1> no_notify;
+			bf_t<u32, 18, 8> reg;
+			bf_t<u32, 0, 18> off18;
+			bf_t<u32, 0, 8> reg2;
+		} info = std::bit_cast<putllc16_info>(range.end);
+
+		enum : u32
+		{
+			v_const = 0,
+			v_relative = 1,
+			v_reg_offs = 2,
+			v_reg2 = 3,
+		};
+
+		const auto _raddr_match = llvm::BasicBlock::Create(m_context, "__raddr_match", m_function);
+		const auto _lock_success = llvm::BasicBlock::Create(m_context, "__putllc16_lock", m_function);
+		const auto _begin_op = llvm::BasicBlock::Create(m_context, "__putllc16_begin", m_function);
+		const auto _repeat_lock = llvm::BasicBlock::Create(m_context, "__putllc16_repeat", m_function);
+		const auto _repeat_lock_fail = llvm::BasicBlock::Create(m_context, "__putllc16_lock_fail", m_function);
+		const auto _success = llvm::BasicBlock::Create(m_context, "__putllc16_success", m_function);
+		const auto _inc_res = llvm::BasicBlock::Create(m_context, "__putllc16_inc_resv", m_function);
+		const auto _inc_res_unlocked = llvm::BasicBlock::Create(m_context, "__putllc16_inc_resv_unlocked", m_function);
+		const auto _success_and_unlock = llvm::BasicBlock::Create(m_context, "__putllc16_succ_unlock", m_function);
+		const auto _fail = llvm::BasicBlock::Create(m_context, "__putllc16_fail", m_function);
+		const auto _fail_and_unlock = llvm::BasicBlock::Create(m_context, "__putllc16_unlock", m_function);
+		const auto _final = llvm::BasicBlock::Create(m_context, "__putllc16_final", m_function);
+
+		const auto _eal = (get_reg_fixed<u32>(s_reg_mfc_eal) & -128).eval(m_ir);
+		const auto _raddr = m_ir->CreateLoad(get_type<u32>(), spu_ptr<u32>(&spu_thread::raddr));
+
+		m_ir->CreateCondBr(m_ir->CreateAnd(m_ir->CreateICmpEQ(_eal, _raddr), m_ir->CreateIsNotNull(_raddr)), _raddr_match, _fail, m_md_likely);
+		m_ir->SetInsertPoint(_raddr_match);
+
+		value_t<u32> eal_val;
+		eal_val.value = _eal;
+
+		auto get_reg32 = [&](u32 reg)
+		{
+			if (get_reg_type(reg) != get_type<u32[4]>())
+			{
+				return get_reg_fixed(reg, get_type<u32>());
+			}
+
+			return extract(get_reg_fixed(reg), 3).eval(m_ir);
+		};
+
+		const auto _lsa = (get_reg_fixed<u32>(s_reg_mfc_lsa) & 0x3ff80).eval(m_ir);
+
+		llvm::Value* dest{};
+
+		if (info.type == v_const)
+		{
+			dest = m_ir->getInt32(info.off18);
+		}
+		else if (info.type == v_relative)
+		{
+			dest = m_ir->CreateAnd(get_pc(spu_branch_target(info.off18 + m_base)), 0x3fff0);
+		}
+		else if (info.type == v_reg_offs)
+		{
+			dest = m_ir->CreateAnd(m_ir->CreateAdd(get_reg32(info.reg), m_ir->getInt32(info.off18)), 0x3fff0);
+		}
+		else
+		{
+			dest = m_ir->CreateAnd(m_ir->CreateAdd(get_reg32(info.reg), get_reg32(info.reg2)), 0x3fff0);
+		}
+
+		if (g_cfg.core.rsx_accurate_res_access)
+		{
+			call("spu_putllc16_rsx_res", +[](spu_thread* _spu, u32 ls_dst, u32 lsa, u32 eal, u32 notify)
+			{
+				const u32 raddr = eal;
+
+				const v128 rdata = read_from_ptr<v128>(_spu->rdata, ls_dst % 0x80);
+				const v128 to_write = _spu->_ref<const nse_t<v128>>(ls_dst);
+
+				const auto dest = raddr | (ls_dst & 127);
+				const auto _dest = vm::get_super_ptr<atomic_t<nse_t<v128>>>(dest);
+				using spu_rdata_t = decltype(spu_thread::rdata);
+
+				extern bool cmp_rdata(const spu_rdata_t& _lhs, const spu_rdata_t& _rhs);
+
+				// if (!cmp_rdata(*reinterpret_cast<const decltype(_spu->rdata)*>(_dest), _spu->rdata))
+				// {
+				// 	_spu->ch_atomic_stat.set_value(MFC_PUTLLC_FAILURE);
+				// 	_spu->set_events(SPU_EVENT_LR);
+				// 	_spu->raddr = 0;
+				// 	return;
+				// }
+
+				if (rdata == to_write || ((lsa ^ ls_dst) & (SPU_LS_SIZE - 128)))
+				{
+					vm::reservation_update(raddr);
+					_spu->ch_atomic_stat.set_value(MFC_PUTLLC_SUCCESS);
+					_spu->raddr = 0;
+					return;
+				}
+
+				const u64 rtime = _spu->rtime;
+				auto& res = vm::reservation_acquire(eal);
+
+				if (res != rtime)
+				{
+					_spu->ch_atomic_stat.set_value(MFC_PUTLLC_FAILURE);
+					_spu->set_events(SPU_EVENT_LR);
+					_spu->raddr = 0;
+					return;
+				}
+
+				rsx::reservation_lock rsx_lock(raddr, 128);
+
+				// Touch memory
+				vm::_ref<atomic_t<u8>>(dest ^ (4096 / 2)).compare_and_swap_test(0, 0);
+
+				auto [old_res, ok] = res.fetch_op([&](u64& rval)
+				{
+					if (rtime != rval)
+					{
+						return false;
+					}
+
+					rval |= 127;
+					return true;
+				});
+
+				if (!ok)
+				{
+					_spu->ch_atomic_stat.set_value(MFC_PUTLLC_FAILURE);
+					_spu->set_events(SPU_EVENT_LR);
+					_spu->raddr = 0;
+					return;
+				}
+
+				if (!_dest->compare_and_swap_test(rdata, to_write))
+				{
+					res.release(old_res);
+					_spu->ch_atomic_stat.set_value(MFC_PUTLLC_FAILURE);
+					_spu->set_events(SPU_EVENT_LR);
+					_spu->raddr = 0;
+					return;
+				}
+
+				// Success
+				res.release(old_res + 128);
+
+				_spu->ch_atomic_stat.set_value(MFC_PUTLLC_SUCCESS);
+				_spu->raddr = 0;
+
+				if (notify)
+				{
+					res.notify_all();
+				}
+			}, m_thread, dest, _lsa, _eal, m_ir->getInt32(!info.no_notify));
+
+
+			m_ir->CreateBr(_final);
+
+			m_ir->SetInsertPoint(_fail);
+			call("PUTLLC16_fail", +on_fail, m_thread, _eal);
+			m_ir->CreateStore(m_ir->getInt64(spu_channel::bit_count | MFC_PUTLLC_FAILURE), spu_ptr<u64>(&spu_thread::ch_atomic_stat));
+			m_ir->CreateBr(_final);
+
+			m_ir->SetInsertPoint(_final);
+			return;
+		}
+
+		const auto diff = m_ir->CreateZExt(m_ir->CreateSub(dest, _lsa), get_type<u64>());
+
+		const auto _new = m_ir->CreateAlignedLoad(get_type<u128>(), _ptr<u128>(m_lsptr, dest), llvm::MaybeAlign{16});
+		const auto _rdata = m_ir->CreateAlignedLoad(get_type<u128>(), _ptr<u128>(spu_ptr<u8>(&spu_thread::rdata), m_ir->CreateAnd(diff, 0x70)), llvm::MaybeAlign{16});
+
+		const bool is_accurate_op = !!g_cfg.core.spu_accurate_reservations;
+
+		const auto compare_data_change_res = is_accurate_op ? m_ir->getTrue() : m_ir->CreateICmpNE(_new, _rdata);
+
+		if (info.runtime16_select)
+		{
+			m_ir->CreateCondBr(m_ir->CreateAnd(m_ir->CreateICmpULT(diff, m_ir->getInt64(128)), compare_data_change_res), _begin_op, _inc_res, m_md_likely);
+		}
+		else
+		{
+			m_ir->CreateCondBr(compare_data_change_res, _begin_op, _inc_res, m_md_unlikely);
+		}
+
+		m_ir->SetInsertPoint(_begin_op);
+
+		// Touch memory (on the opposite side of the page)
+		m_ir->CreateAtomicRMW(llvm::AtomicRMWInst::Or, _ptr<u8>(m_memptr, m_ir->CreateXor(_eal, 4096 / 2)), m_ir->getInt8(0), llvm::MaybeAlign{16}, llvm::AtomicOrdering::SequentiallyConsistent);
+
+		const auto rptr = _ptr<u64>(m_ir->CreateLoad(get_type<u8*>(), spu_ptr<u8*>(&spu_thread::reserv_base_addr)), ((eal_val & 0xff80) >> 1).eval(m_ir));
+		const auto rtime = m_ir->CreateLoad(get_type<u64>(), spu_ptr<u64>(&spu_thread::rtime));
+
+		m_ir->CreateBr(_repeat_lock);
+		m_ir->SetInsertPoint(_repeat_lock);
+
+		const auto rval = m_ir->CreatePHI(get_type<u64>(), 2);
+		rval->addIncoming(rtime, _begin_op);
+
+		// Lock reservation
+		const auto cmp_res = m_ir->CreateAtomicCmpXchg(rptr, rval, m_ir->CreateOr(rval, 0x7f), llvm::MaybeAlign{16}, llvm::AtomicOrdering::SequentiallyConsistent, llvm::AtomicOrdering::SequentiallyConsistent);
+
+		m_ir->CreateCondBr(m_ir->CreateExtractValue(cmp_res, 1), _lock_success, _repeat_lock_fail, m_md_likely);
+
+		m_ir->SetInsertPoint(_repeat_lock_fail);
+
+		const auto last_rval = m_ir->CreateExtractValue(cmp_res, 0);
+		rval->addIncoming(last_rval, _repeat_lock_fail);
+
+		m_ir->CreateCondBr(is_accurate_op ? m_ir->CreateICmpEQ(last_rval, rval) : m_ir->CreateIsNull(m_ir->CreateAnd(last_rval, 0x7f)), _repeat_lock, _fail);
+
+		m_ir->SetInsertPoint(_lock_success);
+
+		// Commit 16 bytes compare-exchange
+		const auto sudo_ptr = _ptr<u8>(m_ir->CreateLoad(get_type<u8*>(), spu_ptr<u8*>(&spu_thread::memory_sudo_addr)), _eal);
+
+		m_ir->CreateCondBr(
+			m_ir->CreateExtractValue(m_ir->CreateAtomicCmpXchg(_ptr<u128>(sudo_ptr, diff), _rdata, _new, llvm::MaybeAlign{16}, llvm::AtomicOrdering::SequentiallyConsistent, llvm::AtomicOrdering::SequentiallyConsistent), 1)
+			, _success_and_unlock
+			, _fail_and_unlock);
+
+		// Unlock and notify
+		m_ir->SetInsertPoint(_success_and_unlock);
+		m_ir->CreateAlignedStore(m_ir->CreateAdd(rval, m_ir->getInt64(128)), rptr, llvm::MaybeAlign{8});
+
+		if (!info.no_notify)
+		{
+			call("atomic_wait_engine::notify_all", static_cast<void(*)(const void*)>(atomic_wait_engine::notify_all), rptr);
+		}
+
+		m_ir->CreateBr(_success);
+
+		// Perform unlocked vm::reservation_update if no physical memory changes needed
+		m_ir->SetInsertPoint(_inc_res);
+		const auto rptr2 = _ptr<u64>(m_ir->CreateLoad(get_type<u8*>(), spu_ptr<u8*>(&spu_thread::reserv_base_addr)), ((eal_val & 0xff80) >> 1).eval(m_ir));
+
+		llvm::Value* old_val{};
+
+		if (true || is_accurate_op)
+		{
+			old_val = m_ir->CreateLoad(get_type<u64>(), spu_ptr<u64>(&spu_thread::rtime));
+		}
+		else
+		{
+			old_val = m_ir->CreateAlignedLoad(get_type<u64>(), rptr2, llvm::MaybeAlign{8});
+			m_ir->CreateCondBr(m_ir->CreateIsNotNull(m_ir->CreateAnd(old_val, 0x7f)), _success, _inc_res_unlocked);
+			m_ir->SetInsertPoint(_inc_res_unlocked);
+		}
+
+		const auto cmp_res2 = m_ir->CreateAtomicCmpXchg(rptr2, old_val, m_ir->CreateAdd(old_val, m_ir->getInt64(128)), llvm::MaybeAlign{16}, llvm::AtomicOrdering::SequentiallyConsistent, llvm::AtomicOrdering::SequentiallyConsistent);
+
+		if (true || is_accurate_op)
+		{
+			m_ir->CreateCondBr(m_ir->CreateExtractValue(cmp_res2, 1), _success, _fail);
+		}
+		else
+		{
+			m_ir->CreateBr(_success);
+		}
+
+		m_ir->SetInsertPoint(_success);
+		m_ir->CreateStore(m_ir->getInt64(spu_channel::bit_count | MFC_PUTLLC_SUCCESS), spu_ptr<u64>(&spu_thread::ch_atomic_stat));
+		m_ir->CreateStore(m_ir->getInt32(0), spu_ptr<u32>(&spu_thread::raddr));
+		m_ir->CreateBr(_final);
+
+		m_ir->SetInsertPoint(_fail_and_unlock);
+		m_ir->CreateAlignedStore(rval, rptr, llvm::MaybeAlign{8});
+		m_ir->CreateBr(_fail);
+
+		m_ir->SetInsertPoint(_fail);
+		call("PUTLLC16_fail", +on_fail, m_thread, _eal);
+		m_ir->CreateStore(m_ir->getInt64(spu_channel::bit_count | MFC_PUTLLC_FAILURE), spu_ptr<u64>(&spu_thread::ch_atomic_stat));
+		m_ir->CreateBr(_final);
+
+		m_ir->SetInsertPoint(_final);
+	}
+
+	void putllc0_pattern(const spu_program& /*prog*/, utils::address_range /*range*/)
+	{
+		// Prevent store elimination
+		m_block->store_context_ctr[s_reg_mfc_eal]++;
+		m_block->store_context_ctr[s_reg_mfc_lsa]++;
+		m_block->store_context_ctr[s_reg_mfc_tag]++;
+		m_block->store_context_ctr[s_reg_mfc_size]++;
+
+		static const auto on_fail = [](spu_thread* _spu, u32 addr)
+		{
+			if (const u32 raddr = _spu->raddr)
+			{
+				// Last check for event before we clear the reservation
+				if (~_spu->ch_events.load().events & SPU_EVENT_LR)
+				{
+					if (raddr == addr)
+					{
+						_spu->set_events(SPU_EVENT_LR);
+					}
+					else
+					{
+						_spu->get_events(SPU_EVENT_LR);
+					}
+				}
+				_spu->raddr = 0;
+			}
+		};
+
+		const auto _next = llvm::BasicBlock::Create(m_context, "", m_function);
+		const auto _next0 = llvm::BasicBlock::Create(m_context, "", m_function);
+		const auto _fail = llvm::BasicBlock::Create(m_context, "", m_function);
+		const auto _final = llvm::BasicBlock::Create(m_context, "", m_function);
+
+		const auto _eal = (get_reg_fixed<u32>(s_reg_mfc_eal) & -128).eval(m_ir);
+		const auto _raddr = m_ir->CreateLoad(get_type<u32>(), spu_ptr<u32>(&spu_thread::raddr));
+
+		m_ir->CreateCondBr(m_ir->CreateAnd(m_ir->CreateICmpEQ(_eal, _raddr), m_ir->CreateIsNotNull(_raddr)), _next, _fail, m_md_likely);
+		m_ir->SetInsertPoint(_next);
+
+		value_t<u32> eal_val;
+		eal_val.value = _eal;
+
+		const auto rptr = _ptr<u64>(m_ir->CreateLoad(get_type<u8*>(), spu_ptr<u8*>(&spu_thread::reserv_base_addr)), ((eal_val & 0xff80) >> 1).eval(m_ir));
+		const auto rval = m_ir->CreateLoad(get_type<u64>(), spu_ptr<u64>(&spu_thread::rtime));
+		m_ir->CreateCondBr(
+			m_ir->CreateExtractValue(m_ir->CreateAtomicCmpXchg(rptr, rval, m_ir->CreateAdd(rval, m_ir->getInt64(128)), llvm::MaybeAlign{16}, llvm::AtomicOrdering::SequentiallyConsistent, llvm::AtomicOrdering::SequentiallyConsistent), 1)
+			, _next0
+			, g_cfg.core.spu_accurate_reservations ? _fail : _next0); // Succeed unconditionally
+
+		m_ir->SetInsertPoint(_next0);
+		//call("atomic_wait_engine::notify_all", static_cast<void(*)(const void*)>(atomic_wait_engine::notify_all), rptr);
+		m_ir->CreateStore(m_ir->getInt64(spu_channel::bit_count | MFC_PUTLLC_SUCCESS), spu_ptr<u64>(&spu_thread::ch_atomic_stat));
+		m_ir->CreateBr(_final);
+
+		m_ir->SetInsertPoint(_fail);
+		call("PUTLLC0_fail", +on_fail, m_thread, _eal);
+		m_ir->CreateStore(m_ir->getInt64(spu_channel::bit_count | MFC_PUTLLC_FAILURE), spu_ptr<u64>(&spu_thread::ch_atomic_stat));
+		m_ir->CreateBr(_final);
+
+		m_ir->SetInsertPoint(_final);
+		m_ir->CreateStore(m_ir->getInt32(0), spu_ptr<u32>(&spu_thread::raddr));
+	}
+
 public:
 	spu_llvm_recompiler(u8 interp_magn = 0)
 		: spu_recompiler_base()
@@ -1183,7 +1565,7 @@ public:
 		if (g_cfg.core.spu_debug && !add_loc->logged.exchange(1))
 		{
 			this->dump(func, log);
-			fs::file(m_spurt->get_cache_path() + "spu.log", fs::write + fs::append).write(log);
+			fs::write_file(m_spurt->get_cache_path() + "spu.log", fs::write + fs::append, log);
 		}
 
 		using namespace llvm;
@@ -1623,6 +2005,26 @@ public:
 					else
 						m_next_op = func.data[(m_pos - start) / 4 + 1];
 
+					switch (m_inst_attrs[(m_pos - start) / 4])
+					{
+					case inst_attr::putllc0:
+					{
+						putllc0_pattern(func, m_patterns.at(m_pos - start).range);
+						continue;
+					}
+					case inst_attr::putllc16:
+					{
+						putllc16_pattern(func, m_patterns.at(m_pos - start).range);
+						continue;
+					}
+					case inst_attr::omit:
+					{
+						// TODO
+						continue;
+					}
+					default: break;
+					}
+
 					// Execute recompiler function (TODO)
 					(this->*decode(op))({op});
 				}
@@ -1671,21 +2073,21 @@ public:
 			// Basic block to block_info
 			std::unordered_map<llvm::BasicBlock*, block_info*> bb_to_info;
 
-			std::vector<block_info*> block_q;
+			std::vector<std::pair<u32, block_info*>> block_q;
 			block_q.reserve(m_blocks.size());
 
 			bool has_gpr_memory_barriers = false;
 
 			for (auto& [a, b] : m_blocks)
 			{
-				block_q.emplace_back(&b);
+				block_q.emplace_back(a, &b);
 				bb_to_info[b.block] = &b;
 				has_gpr_memory_barriers |= b.has_gpr_memory_barriers;
 			}
 
-			for (usz bi = 0; bi < block_q.size();)
+			for (usz bi = 0; bi < block_q.size(); bi++)
 			{
-				auto bqbi = block_q[bi++];
+				auto bqbi = block_q[bi].second;
 
 				// TODO: process all registers up to s_reg_max
 				for (u32 i = 0; i <= s_reg_127; i++)
@@ -1700,6 +2102,8 @@ public:
 							{
 								if (pdt.dominates(b.store[i], bs))
 								{
+									spu_log.trace("Erased r%u store from block 0x%x (simple)", i, block_q[bi].first);
+
 									bs->eraseFromParent();
 									bs = nullptr;
 									break;
@@ -1764,7 +2168,7 @@ public:
 						llvm::SetVector<llvm::BasicBlock*> work_list;
 						std::unordered_map<llvm::BasicBlock*, bool> worked_on;
 
-						if (!common_pdom || std::count(killers.begin(), killers.end(), common_pdom) == 0)
+						if (!common_pdom || std::none_of(killers.begin(), killers.end(), [common_pdom](const llvm::BasicBlock* block){ return block == common_pdom;}))
 						{
 							if (common_pdom)
 							{
@@ -1789,7 +2193,7 @@ public:
 						for (usz wi = 0; wi < work_list.size(); wi++)
 						{
 							auto* cur = work_list[wi];
-							if (std::count(killers.begin(), killers.end(), cur))
+							if (std::any_of(killers.begin(), killers.end(), [cur](const llvm::BasicBlock* block){ return block == cur; }))
 							{
 								work2_list.emplace_back(cur, bb_to_info[cur] && bb_to_info[cur]->does_gpr_barrier_preceed_first_store(i));
 								continue;
@@ -1877,6 +2281,8 @@ public:
 						// Finally erase the dead store
 						if (!killers.empty())
 						{
+							spu_log.trace("Erased r%u store from block 0x%x (reversed)", i, block_q[bi].first);
+
 							bs->eraseFromParent();
 							bs = nullptr;
 
@@ -1890,31 +2296,146 @@ public:
 			block_q.clear();
 			for (auto& [a, b] : m_blocks)
 			{
-				block_q.emplace_back(&b);
+				block_q.emplace_back(a, &b);
 			}
 
 			for (usz bi = 0; bi < block_q.size(); bi++)
 			{
+				auto bqbi = block_q[bi].second;
+
+				std::vector<std::pair<u32, bool>> work_list;
+				std::map<u32, block_info*, std::greater<>> sucs;
+				std::unordered_map<u32, bool> worked_on;
+
 				for (u32 i = 0; i <= s_reg_127; i++)
 				{
-					// If store isn't erased, try to sink it
-					if (auto& bs = block_q[bi]->store[i]; bs && block_q[bi]->bb->targets.size() > 1 && !block_q[bi]->does_gpr_barrier_proceed_last_store(i))
+					if (i == s_reg_sp)
 					{
-						std::map<u32, block_info*, std::greater<>> sucs;
+						// If we postpone R1 store we lose effortless meta-analytical capabilities for little gain
+						continue;
+					}
 
-						for (u32 tj : block_q[bi]->bb->targets)
+					// If store isn't erased, try to sink it
+					if (auto& bs = bqbi->store[i]; bs && bqbi->bb->targets.size() > 1 && !bqbi->does_gpr_barrier_proceed_last_store(i))
+					{
+						if (sucs.empty())
 						{
-							auto b2it = m_blocks.find(tj);
-
-							if (b2it != m_blocks.end())
+							for (u32 tj : bqbi->bb->targets)
 							{
-								sucs.emplace(tj, &b2it->second);
+								auto b2it = m_blocks.find(tj);
+
+								if (b2it != m_blocks.end())
+								{
+									sucs.emplace(tj, &b2it->second);
+								}
 							}
+						}
+
+						// Reset
+						work_list.clear();
+
+						for (auto& [_, worked] : worked_on)
+						{
+							worked = false;
+						}
+
+						bool has_gpr_barriers_in_the_way = false;
+						bool potential_loop = false;
+
+						for (auto [a2, b2] : sucs)
+						{
+							if (a2 == block_q[bi].first)
+							{
+								if (bqbi->store_context_ctr[i] != 1)
+								{
+									has_gpr_barriers_in_the_way = true;
+									break;
+								}
+
+								potential_loop = true;
+								continue;
+							}
+
+							if (!worked_on[a2])
+							{
+								work_list.emplace_back(a2, b2->store_context_ctr[i] != 1);
+								worked_on[a2] = true;
+							}
+						}
+
+						if (has_gpr_barriers_in_the_way)
+						{
+							// Cannot sink store, has barriers in the way
+							continue;
+						}
+
+						for (usz wi = 0; wi < work_list.size(); wi++)
+						{
+							auto [cur, found_barrier] = work_list[wi];
+
+							if (!found_barrier)
+							{
+								if (const auto it = m_blocks.find(cur); it != m_blocks.cend())
+								{
+									if (it->second.store_context_ctr[i] != 1)
+									{
+										found_barrier = true;
+									}
+								}
+							}
+
+							if (cur == block_q[bi].first)
+							{
+								if (found_barrier)
+								{
+									has_gpr_barriers_in_the_way = true;
+									break;
+								}
+
+								potential_loop = true;
+								continue;
+							}
+
+							for (u32 target : m_bbs[cur].targets)
+							{
+								if (!m_block_info[target / 4])
+								{
+									continue;
+								}
+
+								if (m_blocks.find(target) == m_blocks.end())
+								{
+									continue;
+								}
+
+								if (!worked_on[target])
+								{
+									worked_on[target] = true;
+									work_list.emplace_back(target, found_barrier);
+								}
+								// Enqueue a second iteration for found_barrier=true if only found with found_barrier=false 
+								else if (found_barrier && !std::find_if(work_list.rbegin(), work_list.rend(), [&](auto& it){ return it.first == target; })->second)
+								{
+									work_list.emplace_back(target, true);
+								}
+							}
+						}
+
+						if (has_gpr_barriers_in_the_way)
+						{
+							// Cannot sink store, has barriers in the way
+							continue;
+						}
+
+						if (!potential_loop)
+						{
+							spu_log.trace("Avoided postponing r%u store from block 0x%x (not loop)", i, block_q[bi].first);
+							continue;
 						}
 
 						for (auto [a2, b2] : sucs)
 						{
-							if (b2 != block_q[bi])
+							if (b2 != bqbi)
 							{
 								auto ins = b2->block->getFirstNonPHI();
 
@@ -1934,20 +2455,22 @@ public:
 										b2->store_context_last_id[i] = 0;
 										b2->store_context_first_id[i] = b2->store_context_ctr[i] + 1;
 
-										if (!std::count(block_q.begin() + bi, block_q.end(), b2))
+										if (std::none_of(block_q.begin() + bi, block_q.end(), [b_info = b2](auto&& a) { return a.second == b_info; }))
 										{
 											// Sunk store can be checked again
-											block_q.push_back(b2);
+											block_q.emplace_back(a2, b2);
 										}
 									}
+
+									spu_log.trace("Postponed r%u store from block 0x%x (single)", i, block_q[bi].first);
 								}
 								else
 								{
 									// Initialize additional block between two basic blocks
-									auto& edge = block_q[bi]->block_edges[a2];
+									auto& edge = bqbi->block_edges[a2];
 									if (!edge)
 									{
-										const auto succ_range = llvm::successors(block_q[bi]->block_end);
+										const auto succ_range = llvm::successors(bqbi->block_end);
 
 										auto succ = b2->block;
 
@@ -1976,9 +2499,11 @@ public:
 											continue;
 										}
 
-										edge = llvm::SplitEdge(block_q[bi]->block_end, succ);
+										edge = llvm::SplitEdge(bqbi->block_end, succ);
 										pdt.recalculate(*m_function);
 										dt.recalculate(*m_function);
+
+										spu_log.trace("Postponed r%u store from block 0x%x (multiple)", i, block_q[bi].first);
 									}
 
 									ins = edge->getTerminator();
@@ -2125,7 +2650,15 @@ public:
 
 			if (g_cfg.core.spu_debug)
 			{
-				fs::file(m_spurt->get_cache_path() + "spu-ir.log", fs::write + fs::append).write(log);
+				fs::write_file(m_spurt->get_cache_path() + "spu-ir.log", fs::write + fs::append, log);
+			}
+
+			if (auto& cache = g_fxo->get<spu_cache>())
+			{
+				if (add_to_file)
+				{
+					cache.add(func);
+				}
 			}
 
 			fmt::throw_exception("Compilation failed");
@@ -5988,14 +6521,9 @@ public:
 		// This is odd since SPU code could just use the FM instruction, but it seems common enough
 		if (auto [ok, data] = get_const_vector(c.value, m_pos); ok)
 		{
-			if (is_spu_float_zero(data, -1))
+			if (is_spu_float_zero(data, 0))
 			{
 				return eval(a * b);
-			}
-
-			if (!m_use_fma && is_spu_float_zero(data, +1))
-			{
-				return eval(a * b + fsplat<f32[4]>(0.f));
 			}
 		}
 
@@ -6003,40 +6531,24 @@ public:
 		{
 			if (auto [ok, data] = get_const_vector(a.value, m_pos); ok)
 			{
-				if (!is_spu_float_zero(data, +1))
+				if (is_spu_float_zero(data, 0))
 				{
-					return false;
-				}
-
-				if (auto [ok0, data0] = get_const_vector(b.value, m_pos); ok0)
-				{
-					if (is_spu_float_zero(data0, +1))
-					{
-						return true;
-					}
+					return true;
 				}
 			}
 
-			if (auto [ok, data] = get_const_vector(a.value, m_pos); ok)
+			if (auto [ok, data] = get_const_vector(b.value, m_pos); ok)
 			{
-				if (!is_spu_float_zero(data, -1))
+				if (is_spu_float_zero(data, 0))
 				{
-					return false;
-				}
-
-				if (auto [ok0, data0] = get_const_vector(b.value, m_pos); ok0)
-				{
-					if (is_spu_float_zero(data0, -1))
-					{
-						return true;
-					}
+					return true;
 				}
 			}
 
 			return false;
 		}())
 		{
-			// Just return the added value if both a and b is +0 or -0 (+0 and -0 arent't allowed alone)
+			// Just return the added value if either a or b are +-0
 			return c;
 		}
 
@@ -6409,7 +6921,7 @@ public:
 			const auto bnew = (base - ymul) >> (zext<u32[4]>(comparison) ^ 9); // Shift one less bit if exponent is adjusted
 			const auto base_result = (b & 0xff800000u) | (bnew & ~0xff800000u); // Inject old sign and exponent
 			const auto adjustment = bitcast<u32[4]>(sext<s32[4]>(comparison)) & (1 << 23); // exponent adjustement for negative bnew
-			return bitcast<f32[4]>(base_result - adjustment);
+			return clamp_smax(eval(bitcast<f32[4]>(base_result - adjustment)));
 		});
 
 		const auto [a, b] = get_vrs<f32[4]>(op.ra, op.rb);
@@ -6443,7 +6955,7 @@ public:
 				const auto bnew = (base - ymul) >> (zext<u32[4]>(comparison) ^ 9); // Shift one less bit if exponent is adjusted
 				const auto base_result = (b & 0xff800000u) | (bnew & ~0xff800000u); // Inject old sign and exponent
 				const auto adjustment = bitcast<u32[4]>(sext<s32[4]>(comparison)) & (1 << 23); // exponent adjustement for negative bnew
-				return bitcast<f32[4]>(base_result - adjustment);
+				return clamp_smax(eval(bitcast<f32[4]>(base_result - adjustment)));
 			});
 
 			register_intrinsic("spu_rsqrte", [&](llvm::CallInst* ci)
@@ -6470,7 +6982,7 @@ public:
 				const auto bnew = (base - ymul) >> (zext<u32[4]>(comparison) ^ 9); // Shift one less bit if exponent is adjusted
 				const auto base_result = (b & 0xff800000u) | (bnew & ~0xff800000u); // Inject old sign and exponent
 				const auto adjustment = bitcast<u32[4]>(sext<s32[4]>(comparison)) & (1 << 23); // exponent adjustement for negative bnew
-				return bitcast<f32[4]>(base_result - adjustment);
+				return clamp_smax(eval(bitcast<f32[4]>(base_result - adjustment)));
 			});
 			break;
 		}
@@ -7661,10 +8173,14 @@ public:
 			return;
 		}
 
+		const auto compiled_pos = m_ir->getInt32(m_pos);
 		const u32 target = spu_branch_target(0, op.i16);
 
 		m_block->block_end = m_ir->GetInsertBlock();
-		m_ir->CreateBr(add_block(target, true));
+		const auto real_pos = get_pc(m_pos);
+		value_t<u32> target_val;
+		target_val.value = m_ir->getInt32(target);
+		m_ir->CreateCondBr(m_ir->CreateICmpEQ(real_pos, compiled_pos), add_block(target, true), add_block_indirect({}, target_val));
 	}
 
 	void BRASL(spu_opcode_t op) //

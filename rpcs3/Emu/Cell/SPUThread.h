@@ -668,6 +668,8 @@ public:
 
 	// May be used by recompilers.
 	u8* memory_base_addr = vm::g_base_addr;
+	u8* memory_sudo_addr = vm::g_sudo_addr;
+	u8* reserv_base_addr = vm::g_reservations;
 
 	// General-Purpose Registers
 	std::array<v128, 128> gpr;
@@ -675,7 +677,6 @@ public:
 
 	// MFC command data
 	spu_mfc_cmd ch_mfc_cmd;
-	u32 mfc_cmd_id = 0;
 
 	// MFC command queue
 	spu_mfc_cmd mfc_queue[16]{};
@@ -795,9 +796,11 @@ public:
 	u64 last_succ = 0;
 	u64 last_gtsc = 0;
 	u32 last_getllar = umax; // LS address of last GETLLAR (if matches current GETLLAR we can let the thread rest)
-	u32 last_getllar_id = umax;
+	u32 last_getllar_gpr1 = umax;
+	u32 last_getllar_addr = umax;
 	u32 getllar_spin_count = 0;
 	u32 getllar_busy_waiting_switch = umax; // umax means the test needs evaluation, otherwise it's a boolean
+	u64 getllar_evaluate_time = 0;
 
 	std::vector<mfc_cmd_dump> mfc_history;
 	u64 mfc_dump_idx = 0;
@@ -816,11 +819,13 @@ public:
 	atomic_t<spu_debugger_mode> debugger_mode{};
 
 	// PC-based breakpoint list
-	std::array<atomic_t<bool>, SPU_LS_SIZE / 4> local_breakpoints{};
+	std::array<atomic_t<u8>, SPU_LS_SIZE / 4 / 8> local_breakpoints{};
 	atomic_t<bool> has_active_local_bps = false;
 	u32 current_bp_pc = umax;
 	bool stop_flag_removal_protection = false;
 
+	std::array<std::array<u8, 4>, SPU_LS_SIZE / 32> getllar_wait_time{};
+ 
 	void push_snr(u32 number, u32 value);
 	static void do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8* ls);
 	bool do_dma_check(const spu_mfc_cmd& args);

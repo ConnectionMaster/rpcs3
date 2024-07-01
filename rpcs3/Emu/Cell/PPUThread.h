@@ -262,7 +262,8 @@ public:
 	u64 rtime{0};
 	alignas(64) std::byte rdata[128]{}; // Reservation data
 	bool use_full_rdata{};
-	u32 res_notify{};
+	u32 res_notify{0};
+	u64 res_notify_time{0};
 
 	union ppu_prio_t
 	{
@@ -385,10 +386,10 @@ struct ppu_gpr_cast_impl
 };
 
 template<typename T>
-struct ppu_gpr_cast_impl<T, std::enable_if_t<std::is_integral<T>::value || std::is_enum<T>::value>>
+struct ppu_gpr_cast_impl<T, std::enable_if_t<std::is_integral_v<T> || std::is_enum_v<T>>>
 {
 	static_assert(sizeof(T) <= 8, "Too big integral type for ppu_gpr_cast<>()");
-	static_assert(std::is_same<std::decay_t<T>, bool>::value == false, "bool type is deprecated in ppu_gpr_cast<>(), use b8 instead");
+	static_assert(std::is_same_v<std::decay_t<T>, bool> == false, "bool type is deprecated in ppu_gpr_cast<>(), use b8 instead");
 
 	static inline u64 to(const T& value)
 	{

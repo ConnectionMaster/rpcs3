@@ -88,8 +88,8 @@ const std::map<const std::pair<const u16, const u16>, const std::string> list_sk
     {{20, 0x0000}, "Drobot"},
     {{20, 0x1801}, "Series 2 Drobot"},
     {{20, 0x1206}, "LightCore Drobot"},
-    {{21, 0x0000}, "Drill Seargeant"},
-    {{21, 0x1801}, "Series 2 Drill Seargeant"},
+    {{21, 0x0000}, "Drill Sergeant"},
+    {{21, 0x1801}, "Series 2 Drill Sergeant"},
     {{22, 0x0000}, "Boomer"},
     {{22, 0x4810}, "Eon's Elite Boomer"},
     {{23, 0x0000}, "Wrecking Ball"},
@@ -627,7 +627,7 @@ skylander_creator_dialog::skylander_creator_dialog(QWidget* parent)
 			predef_name += QString("Unknown(%1 %2).sky").arg(sky_id).arg(sky_var);
 		}
 
-		file_path = QFileDialog::getSaveFileName(this, tr("Create Skylander File"), predef_name, tr("Skylander Object (*.sky);;"));
+		file_path = QFileDialog::getSaveFileName(this, tr("Create Skylander File"), predef_name, tr("Skylander Object (*.sky);;All Files (*)"));
 		if (file_path.isEmpty())
 		{
 			return;
@@ -748,9 +748,9 @@ skylander_dialog* skylander_dialog::get_dlg(QWidget* parent)
 
 void skylander_dialog::clear_skylander(u8 slot)
 {
-	if (auto slot_infos = sky_slots[slot])
+	if (const auto& slot_infos = sky_slots[slot])
 	{
-		auto [cur_slot, id, var] = slot_infos.value();
+		const auto& [cur_slot, id, var] = slot_infos.value();
 		g_skyportal.remove_skylander(cur_slot);
 		sky_slots[slot] = {};
 		update_edits();
@@ -768,7 +768,7 @@ void skylander_dialog::create_skylander(u8 slot)
 
 void skylander_dialog::load_skylander(u8 slot)
 {
-	const QString file_path = QFileDialog::getOpenFileName(this, tr("Select Skylander File"), last_skylander_path, tr("Skylander (*.sky);;"));
+	const QString file_path = QFileDialog::getOpenFileName(this, tr("Select Skylander File"), last_skylander_path, tr("Skylander (*.sky *.bin *.dmp *.dump);;All Files (*)"));
 	if (file_path.isEmpty())
 	{
 		return;
@@ -811,10 +811,10 @@ void skylander_dialog::update_edits()
 	for (auto i = 0; i < UI_SKY_NUM; i++)
 	{
 		QString display_string;
-		if (auto sd = sky_slots[i])
+		if (const auto& sd = sky_slots[i])
 		{
-			auto [portal_slot, sky_id, sky_var] = sd.value();
-			auto found_sky                      = list_skylanders.find(std::make_pair(sky_id, sky_var));
+			const auto& [portal_slot, sky_id, sky_var] = sd.value();
+			const auto found_sky = list_skylanders.find(std::make_pair(sky_id, sky_var));
 			if (found_sky != list_skylanders.end())
 			{
 				display_string = QString::fromStdString(found_sky->second);

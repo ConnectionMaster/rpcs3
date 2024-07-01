@@ -10,7 +10,7 @@
 
 constexpr auto qstr = QString::fromStdString;
 
-extern bool is_using_interpreter(u32 id_type);
+extern bool is_using_interpreter(thread_class t_class);
 
 breakpoint_list::breakpoint_list(QWidget* parent, breakpoint_handler* handler) : QListWidget(parent), m_ppu_breakpoint_handler(handler)
 {
@@ -107,15 +107,15 @@ void breakpoint_list::HandleBreakpointRequest(u32 loc, bool only_add)
 		return;
 	}
 
-	if (!is_using_interpreter(m_cpu->id_type()))
+	if (!is_using_interpreter(m_cpu->get_class()))
 	{
 		QMessageBox::warning(this, tr("Interpreters-Only Feature!"), tr("Cannot set breakpoints on non-interpreter decoders."));
 		return;
 	}
 
-	switch (m_cpu->id_type())
+	switch (m_cpu->get_class())
 	{
-	case 2:
+	case thread_class::spu:
 	{
 		if (loc >= SPU_LS_SIZE || loc % 4)
 		{
@@ -125,8 +125,10 @@ void breakpoint_list::HandleBreakpointRequest(u32 loc, bool only_add)
 
 		const auto spu = static_cast<spu_thread*>(m_cpu);
 		auto& list = spu->local_breakpoints;
+		const u32 pos_at = loc / 4;
+		const u32 pos_bit = 1u << (pos_at % 8);
 
-		if (list[loc / 4].test_and_invert())
+		if (list[pos_at / 8].fetch_xor(pos_bit) & pos_bit)
 		{
 			if (std::none_of(list.begin(), list.end(), [](auto& val){ return val.load(); }))
 			{
@@ -153,7 +155,8 @@ void breakpoint_list::HandleBreakpointRequest(u32 loc, bool only_add)
 
 		return;
 	}
-	case 1: break;
+	case thread_class::ppu:
+		break;
 	default:
 		QMessageBox::warning(this, tr("Unimplemented Breakpoints For Thread Type!"), tr("Cannot set breakpoints on a thread not an PPU/SPU currently, sorry."));
 		return;

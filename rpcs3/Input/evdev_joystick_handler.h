@@ -70,7 +70,13 @@ struct positive_axis : cfg::node
 
 	void save()
 	{
-		fs::file(cfg_name, fs::rewrite).write(to_string());
+		fs::pending_file file(cfg_name);
+
+		if (file.file)
+		{
+			file.file.write(to_string());
+			file.commit();
+		}
 	}
 
 	bool exist()
@@ -394,7 +400,7 @@ class evdev_joystick_handler final : public PadHandlerBase
 	};
 
 public:
-	evdev_joystick_handler(bool emulation);
+	evdev_joystick_handler();
 	~evdev_joystick_handler();
 
 	void init_config(cfg_pad* cfg) override;

@@ -9,159 +9,28 @@
 
 LOG_CHANNEL(sdl_log, "SDL");
 
-std::mutex g_sdl_mutex;
-u32 g_sdl_handler_count = 0;
-
-constexpr u32 rumble_duration_ms = 500; // Some high number to keep rumble updates at a minimum.
-constexpr u32 rumble_refresh_ms = rumble_duration_ms - 100; // We need to keep updating the rumble. Choose a refresh timeout that is unlikely to run into missed rumble updates.
-
-sdl_pad_handler::sdl_pad_handler(bool emulation) : PadHandlerBase(pad_handler::sdl, emulation)
+struct sdl_instance
 {
-	button_list =
+public:
+	sdl_instance() = default;
+	~sdl_instance()
 	{
-		{ SDLKeyCodes::None,     ""         },
-		{ SDLKeyCodes::A,        "A"        },
-		{ SDLKeyCodes::B,        "B"        },
-		{ SDLKeyCodes::X,        "X"        },
-		{ SDLKeyCodes::Y,        "Y"        },
-		{ SDLKeyCodes::Left,     "Left"     },
-		{ SDLKeyCodes::Right,    "Right"    },
-		{ SDLKeyCodes::Up,       "Up"       },
-		{ SDLKeyCodes::Down,     "Down"     },
-		{ SDLKeyCodes::LB,       "LB"       },
-		{ SDLKeyCodes::RB,       "RB"       },
-		{ SDLKeyCodes::Back,     "Back"     },
-		{ SDLKeyCodes::Start,    "Start"    },
-		{ SDLKeyCodes::LS,       "LS"       },
-		{ SDLKeyCodes::RS,       "RS"       },
-		{ SDLKeyCodes::Guide,    "Guide"    },
-		{ SDLKeyCodes::Misc1,    "Misc 1"   },
-		{ SDLKeyCodes::Paddle1,  "Paddle 1" },
-		{ SDLKeyCodes::Paddle2,  "Paddle 2" },
-		{ SDLKeyCodes::Paddle3,  "Paddle 3" },
-		{ SDLKeyCodes::Paddle4,  "Paddle 4" },
-		{ SDLKeyCodes::Touchpad, "Touchpad" },
-		{ SDLKeyCodes::LT,       "LT"       },
-		{ SDLKeyCodes::RT,       "RT"       },
-		{ SDLKeyCodes::LSXNeg,   "LS X-"    },
-		{ SDLKeyCodes::LSXPos,   "LS X+"    },
-		{ SDLKeyCodes::LSYPos,   "LS Y+"    },
-		{ SDLKeyCodes::LSYNeg,   "LS Y-"    },
-		{ SDLKeyCodes::RSXNeg,   "RS X-"    },
-		{ SDLKeyCodes::RSXPos,   "RS X+"    },
-		{ SDLKeyCodes::RSYPos,   "RS Y+"    },
-		{ SDLKeyCodes::RSYNeg,   "RS Y-"    },
-	};
-
-	init_configs();
-
-	// Define border values
-	thumb_max = SDL_JOYSTICK_AXIS_MAX;
-	trigger_min = 0;
-	trigger_max = SDL_JOYSTICK_AXIS_MAX;
-
-	// set capabilities
-	b_has_config = true;
-	b_has_deadzones = true;
-	b_has_rumble = true;
-	b_has_motion = true;
-	b_has_led = true;
-	b_has_rgb = true;
-	b_has_battery = true;
-
-	m_trigger_threshold = trigger_max / 2;
-	m_thumb_threshold = thumb_max / 2;
-}
-
-sdl_pad_handler::~sdl_pad_handler()
-{
-	if (!m_is_init)
-		return;
-
-	for (auto& controller : m_controllers)
-	{
-		if (controller.second && controller.second->sdl.game_controller)
+		// Only quit SDL once on exit. SDL uses a global state internally...
+		if (m_initialized)
 		{
-			set_rumble(controller.second.get(), 0, 0);
-			SDL_GameControllerClose(controller.second->sdl.game_controller);
-			controller.second->sdl.game_controller = nullptr;
+			sdl_log.notice("Quitting SDL ...");
+			SDL_Quit();
 		}
 	}
 
-	// Only quit SDL if this is the last instance of the handler. SDL uses a global state internally...
-	std::lock_guard lock(g_sdl_mutex);
-	if (g_sdl_handler_count > 0 && --g_sdl_handler_count == 0)
+	bool initialize()
 	{
-		sdl_log.notice("Quitting SDL ...");
-		SDL_Quit();
-	}
-}
+		// Only init SDL once. SDL uses a global state internally...
+		if (m_initialized)
+		{
+			return true;
+		}
 
-void sdl_pad_handler::init_config(cfg_pad* cfg)
-{
-	if (!cfg) return;
-
-	// Set default button mapping
-	cfg->ls_left.def  = ::at32(button_list, SDLKeyCodes::LSXNeg);
-	cfg->ls_down.def  = ::at32(button_list, SDLKeyCodes::LSYNeg);
-	cfg->ls_right.def = ::at32(button_list, SDLKeyCodes::LSXPos);
-	cfg->ls_up.def    = ::at32(button_list, SDLKeyCodes::LSYPos);
-	cfg->rs_left.def  = ::at32(button_list, SDLKeyCodes::RSXNeg);
-	cfg->rs_down.def  = ::at32(button_list, SDLKeyCodes::RSYNeg);
-	cfg->rs_right.def = ::at32(button_list, SDLKeyCodes::RSXPos);
-	cfg->rs_up.def    = ::at32(button_list, SDLKeyCodes::RSYPos);
-	cfg->start.def    = ::at32(button_list, SDLKeyCodes::Start);
-	cfg->select.def   = ::at32(button_list, SDLKeyCodes::Back);
-	cfg->ps.def       = ::at32(button_list, SDLKeyCodes::Guide);
-	cfg->square.def   = ::at32(button_list, SDLKeyCodes::X);
-	cfg->cross.def    = ::at32(button_list, SDLKeyCodes::A);
-	cfg->circle.def   = ::at32(button_list, SDLKeyCodes::B);
-	cfg->triangle.def = ::at32(button_list, SDLKeyCodes::Y);
-	cfg->left.def     = ::at32(button_list, SDLKeyCodes::Left);
-	cfg->down.def     = ::at32(button_list, SDLKeyCodes::Down);
-	cfg->right.def    = ::at32(button_list, SDLKeyCodes::Right);
-	cfg->up.def       = ::at32(button_list, SDLKeyCodes::Up);
-	cfg->r1.def       = ::at32(button_list, SDLKeyCodes::RB);
-	cfg->r2.def       = ::at32(button_list, SDLKeyCodes::RT);
-	cfg->r3.def       = ::at32(button_list, SDLKeyCodes::RS);
-	cfg->l1.def       = ::at32(button_list, SDLKeyCodes::LB);
-	cfg->l2.def       = ::at32(button_list, SDLKeyCodes::LT);
-	cfg->l3.def       = ::at32(button_list, SDLKeyCodes::LS);
-
-	cfg->pressure_intensity_button.def = ::at32(button_list, SDLKeyCodes::None);
-
-	// Set default misc variables
-	cfg->lstickdeadzone.def    = 8000; // between 0 and SDL_JOYSTICK_AXIS_MAX
-	cfg->rstickdeadzone.def    = 8000; // between 0 and SDL_JOYSTICK_AXIS_MAX
-	cfg->ltriggerthreshold.def = 0; // between 0 and SDL_JOYSTICK_AXIS_MAX
-	cfg->rtriggerthreshold.def = 0; // between 0 and SDL_JOYSTICK_AXIS_MAX
-	cfg->lpadsquircling.def    = 8000;
-	cfg->rpadsquircling.def    = 8000;
-
-	// Set default color value
-	cfg->colorR.def = 0;
-	cfg->colorG.def = 0;
-	cfg->colorB.def = 20;
-
-	// Set default LED options
-	cfg->led_battery_indicator.def            = false;
-	cfg->led_battery_indicator_brightness.def = 10;
-	cfg->led_low_battery_blink.def            = true;
-
-	// apply defaults
-	cfg->from_default();
-}
-
-bool sdl_pad_handler::Init()
-{
-	if (m_is_init)
-		return true;
-
-	std::lock_guard lock(g_sdl_mutex);
-
-	// Only init SDL if this is the first instance of the handler. SDL uses a global state internally...
-	if (g_sdl_handler_count++ == 0)
-	{
 		sdl_log.notice("Initializing SDL ...");
 
 		// Set non-dynamic hints before SDL_Init
@@ -236,7 +105,157 @@ bool sdl_pad_handler::Init()
 				break;
 			}
 		}, nullptr);
+
+		m_initialized = true;
+		return true;
 	}
+
+private:
+	bool m_initialized = false;
+};
+
+constexpr u32 rumble_duration_ms = 500; // Some high number to keep rumble updates at a minimum.
+constexpr u32 rumble_refresh_ms = rumble_duration_ms - 100; // We need to keep updating the rumble. Choose a refresh timeout that is unlikely to run into missed rumble updates.
+
+sdl_pad_handler::sdl_pad_handler() : PadHandlerBase(pad_handler::sdl)
+{
+	button_list =
+	{
+		{ SDLKeyCodes::None,     ""         },
+		{ SDLKeyCodes::A,        "A"        },
+		{ SDLKeyCodes::B,        "B"        },
+		{ SDLKeyCodes::X,        "X"        },
+		{ SDLKeyCodes::Y,        "Y"        },
+		{ SDLKeyCodes::Left,     "Left"     },
+		{ SDLKeyCodes::Right,    "Right"    },
+		{ SDLKeyCodes::Up,       "Up"       },
+		{ SDLKeyCodes::Down,     "Down"     },
+		{ SDLKeyCodes::LB,       "LB"       },
+		{ SDLKeyCodes::RB,       "RB"       },
+		{ SDLKeyCodes::Back,     "Back"     },
+		{ SDLKeyCodes::Start,    "Start"    },
+		{ SDLKeyCodes::LS,       "LS"       },
+		{ SDLKeyCodes::RS,       "RS"       },
+		{ SDLKeyCodes::Guide,    "Guide"    },
+		{ SDLKeyCodes::Misc1,    "Misc 1"   },
+		{ SDLKeyCodes::Paddle1,  "Paddle 1" },
+		{ SDLKeyCodes::Paddle2,  "Paddle 2" },
+		{ SDLKeyCodes::Paddle3,  "Paddle 3" },
+		{ SDLKeyCodes::Paddle4,  "Paddle 4" },
+		{ SDLKeyCodes::Touchpad, "Touchpad" },
+		{ SDLKeyCodes::LT,       "LT"       },
+		{ SDLKeyCodes::RT,       "RT"       },
+		{ SDLKeyCodes::LSXNeg,   "LS X-"    },
+		{ SDLKeyCodes::LSXPos,   "LS X+"    },
+		{ SDLKeyCodes::LSYPos,   "LS Y+"    },
+		{ SDLKeyCodes::LSYNeg,   "LS Y-"    },
+		{ SDLKeyCodes::RSXNeg,   "RS X-"    },
+		{ SDLKeyCodes::RSXPos,   "RS X+"    },
+		{ SDLKeyCodes::RSYPos,   "RS Y+"    },
+		{ SDLKeyCodes::RSYNeg,   "RS Y-"    },
+	};
+
+	init_configs();
+
+	// Define border values
+	thumb_max = SDL_JOYSTICK_AXIS_MAX;
+	trigger_min = 0;
+	trigger_max = SDL_JOYSTICK_AXIS_MAX;
+
+	// set capabilities
+	b_has_config = true;
+	b_has_deadzones = true;
+	b_has_rumble = true;
+	b_has_motion = true;
+	b_has_led = true;
+	b_has_rgb = true;
+	b_has_battery = true;
+
+	m_trigger_threshold = trigger_max / 2;
+	m_thumb_threshold = thumb_max / 2;
+}
+
+sdl_pad_handler::~sdl_pad_handler()
+{
+	if (!m_is_init)
+		return;
+
+	for (auto& controller : m_controllers)
+	{
+		if (controller.second && controller.second->sdl.game_controller)
+		{
+			set_rumble(controller.second.get(), 0, 0);
+			SDL_GameControllerClose(controller.second->sdl.game_controller);
+			controller.second->sdl.game_controller = nullptr;
+		}
+	}
+}
+
+void sdl_pad_handler::init_config(cfg_pad* cfg)
+{
+	if (!cfg) return;
+
+	// Set default button mapping
+	cfg->ls_left.def  = ::at32(button_list, SDLKeyCodes::LSXNeg);
+	cfg->ls_down.def  = ::at32(button_list, SDLKeyCodes::LSYNeg);
+	cfg->ls_right.def = ::at32(button_list, SDLKeyCodes::LSXPos);
+	cfg->ls_up.def    = ::at32(button_list, SDLKeyCodes::LSYPos);
+	cfg->rs_left.def  = ::at32(button_list, SDLKeyCodes::RSXNeg);
+	cfg->rs_down.def  = ::at32(button_list, SDLKeyCodes::RSYNeg);
+	cfg->rs_right.def = ::at32(button_list, SDLKeyCodes::RSXPos);
+	cfg->rs_up.def    = ::at32(button_list, SDLKeyCodes::RSYPos);
+	cfg->start.def    = ::at32(button_list, SDLKeyCodes::Start);
+	cfg->select.def   = ::at32(button_list, SDLKeyCodes::Back);
+	cfg->ps.def       = ::at32(button_list, SDLKeyCodes::Guide);
+	cfg->square.def   = ::at32(button_list, SDLKeyCodes::X);
+	cfg->cross.def    = ::at32(button_list, SDLKeyCodes::A);
+	cfg->circle.def   = ::at32(button_list, SDLKeyCodes::B);
+	cfg->triangle.def = ::at32(button_list, SDLKeyCodes::Y);
+	cfg->left.def     = ::at32(button_list, SDLKeyCodes::Left);
+	cfg->down.def     = ::at32(button_list, SDLKeyCodes::Down);
+	cfg->right.def    = ::at32(button_list, SDLKeyCodes::Right);
+	cfg->up.def       = ::at32(button_list, SDLKeyCodes::Up);
+	cfg->r1.def       = ::at32(button_list, SDLKeyCodes::RB);
+	cfg->r2.def       = ::at32(button_list, SDLKeyCodes::RT);
+	cfg->r3.def       = ::at32(button_list, SDLKeyCodes::RS);
+	cfg->l1.def       = ::at32(button_list, SDLKeyCodes::LB);
+	cfg->l2.def       = ::at32(button_list, SDLKeyCodes::LT);
+	cfg->l3.def       = ::at32(button_list, SDLKeyCodes::LS);
+
+	cfg->pressure_intensity_button.def = ::at32(button_list, SDLKeyCodes::None);
+
+	// Set default misc variables
+	cfg->lstick_anti_deadzone.def = static_cast<u32>(0.13 * thumb_max); // 13%
+	cfg->rstick_anti_deadzone.def = static_cast<u32>(0.13 * thumb_max); // 13%
+	cfg->lstickdeadzone.def    = 8000; // between 0 and SDL_JOYSTICK_AXIS_MAX
+	cfg->rstickdeadzone.def    = 8000; // between 0 and SDL_JOYSTICK_AXIS_MAX
+	cfg->ltriggerthreshold.def = 0; // between 0 and SDL_JOYSTICK_AXIS_MAX
+	cfg->rtriggerthreshold.def = 0; // between 0 and SDL_JOYSTICK_AXIS_MAX
+	cfg->lpadsquircling.def    = 8000;
+	cfg->rpadsquircling.def    = 8000;
+
+	// Set default color value
+	cfg->colorR.def = 0;
+	cfg->colorG.def = 0;
+	cfg->colorB.def = 20;
+
+	// Set default LED options
+	cfg->led_battery_indicator.def            = false;
+	cfg->led_battery_indicator_brightness.def = 10;
+	cfg->led_low_battery_blink.def            = true;
+
+	// apply defaults
+	cfg->from_default();
+}
+
+bool sdl_pad_handler::Init()
+{
+	if (m_is_init)
+		return true;
+
+	static sdl_instance s_sdl_instance {};
+	if (!s_sdl_instance.initialize())
+		return false;
 
 	if (g_cfg.io.load_sdl_mappings)
 	{

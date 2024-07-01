@@ -14,7 +14,7 @@ namespace XINPUT_INFO
 	};
 } // namespace XINPUT_INFO
 
-xinput_pad_handler::xinput_pad_handler(bool emulation) : PadHandlerBase(pad_handler::xinput, emulation)
+xinput_pad_handler::xinput_pad_handler() : PadHandlerBase(pad_handler::xinput)
 {
 	// Unique names for the config files and our pad settings dialog
 	button_list =
@@ -115,6 +115,8 @@ void xinput_pad_handler::init_config(cfg_pad* cfg)
 	cfg->pressure_intensity_button.def = ::at32(button_list, XInputKeyCodes::None);
 
 	// Set default misc variables
+	cfg->lstick_anti_deadzone.def = static_cast<u32>(0.13 * thumb_max); // 13%
+	cfg->rstick_anti_deadzone.def = static_cast<u32>(0.13 * thumb_max); // 13%
 	cfg->lstickdeadzone.def    = XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE;  // between 0 and 32767
 	cfg->rstickdeadzone.def    = XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE; // between 0 and 32767
 	cfg->ltriggerthreshold.def = XINPUT_GAMEPAD_TRIGGER_THRESHOLD;    // between 0 and 255

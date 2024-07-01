@@ -4,6 +4,7 @@
 #include "Emu/Io/buzz_config.h"
 #include "Emu/Io/gem_config.h"
 #include "Emu/Io/ghltar_config.h"
+#include "Emu/Io/guncon3_config.h"
 #include "Emu/Io/turntable_config.h"
 #include "Emu/Io/usio_config.h"
 #include "util/asm.hpp"
@@ -33,7 +34,7 @@ emulated_pad_settings_dialog::emulated_pad_settings_dialog(pad_type type, QWidge
 	QTabWidget* tabs = new QTabWidget();
 	tabs->setUsesScrollButtons(false);
 
-	QDialogButtonBox* buttons =new QDialogButtonBox(this);
+	QDialogButtonBox* buttons = new QDialogButtonBox(this);
 	buttons->setStandardButtons(QDialogButtonBox::Apply | QDialogButtonBox::Cancel | QDialogButtonBox::Save | QDialogButtonBox::RestoreDefaults);
 
 	connect(buttons, &QDialogButtonBox::clicked, this, [this, buttons](QAbstractButton* button)
@@ -55,6 +56,8 @@ emulated_pad_settings_dialog::emulated_pad_settings_dialog(pad_type type, QWidge
 		}
 		else if (button == buttons->button(QDialogButtonBox::Cancel))
 		{
+			// Restore config
+			load_config();
 			reject();
 		}
 	});
@@ -82,6 +85,10 @@ emulated_pad_settings_dialog::emulated_pad_settings_dialog(pad_type type, QWidge
 	case emulated_pad_settings_dialog::pad_type::ds3gem:
 		setWindowTitle(tr("Configure Emulated PS Move (Fake)"));
 		add_tabs<gem_btn>(tabs);
+		break;
+	case emulated_pad_settings_dialog::pad_type::guncon3:
+		setWindowTitle(tr("Configure Emulated GunCon 3"));
+		add_tabs<guncon3_btn>(tabs);
 		break;
 	}
 
@@ -121,6 +128,9 @@ void emulated_pad_settings_dialog::add_tabs(QTabWidget* tabs)
 	case pad_type::ds3gem:
 		players = g_cfg_gem.players.size();
 		break;
+	case pad_type::guncon3:
+		players = g_cfg_guncon3.players.size();
+		break;
 	}
 
 	m_combos.resize(players);
@@ -148,6 +158,18 @@ void emulated_pad_settings_dialog::add_tabs(QTabWidget* tabs)
 				combo->setItemData(index, i, button_role::emulated_button);
 			}
 
+			if constexpr (std::is_same_v<T, guncon3_btn>)
+			{
+				for (int p = static_cast<int>(pad_button::mouse_button_1); p <= static_cast<int>(pad_button::mouse_button_8); p++)
+				{
+					const QString translated = localized_emu::translated_pad_button(static_cast<pad_button>(p));
+					combo->addItem(translated);
+					const int index = combo->findText(translated);
+					combo->setItemData(index, p, button_role::button);
+					combo->setItemData(index, i, button_role::emulated_button);
+				}
+			}
+
 			pad_button saved_btn_id = pad_button::pad_button_max_enum;
 			switch (m_type)
 			{
@@ -165,6 +187,9 @@ void emulated_pad_settings_dialog::add_tabs(QTabWidget* tabs)
 				break;
 			case pad_type::ds3gem:
 				saved_btn_id = ::at32(g_cfg_gem.players, player)->get_pad_button(static_cast<gem_btn>(id));
+				break;
+			case pad_type::guncon3:
+				saved_btn_id = ::at32(g_cfg_guncon3.players, player)->get_pad_button(static_cast<guncon3_btn>(id));
 				break;
 			}
 
@@ -197,6 +222,9 @@ void emulated_pad_settings_dialog::add_tabs(QTabWidget* tabs)
 					break;
 				case pad_type::ds3gem:
 					::at32(g_cfg_gem.players, player)->set_button(static_cast<gem_btn>(id), btn_id);
+					break;
+				case pad_type::guncon3:
+					::at32(g_cfg_guncon3.players, player)->set_button(static_cast<guncon3_btn>(id), btn_id);
 					break;
 				}
 			});
@@ -252,6 +280,12 @@ void emulated_pad_settings_dialog::load_config()
 			cfg_log.notice("Could not load gem config. Using defaults.");
 		}
 		break;
+	case emulated_pad_settings_dialog::pad_type::guncon3:
+		if (!g_cfg_guncon3.load())
+		{
+			cfg_log.notice("Could not load guncon3 config. Using defaults.");
+		}
+		break;
 	}
 }
 
@@ -274,6 +308,9 @@ void emulated_pad_settings_dialog::save_config()
 	case emulated_pad_settings_dialog::pad_type::ds3gem:
 		g_cfg_gem.save();
 		break;
+	case emulated_pad_settings_dialog::pad_type::guncon3:
+		g_cfg_guncon3.save();
+		break;
 	}
 }
 
@@ -295,6 +332,9 @@ void emulated_pad_settings_dialog::reset_config()
 		break;
 	case emulated_pad_settings_dialog::pad_type::ds3gem:
 		g_cfg_gem.from_default();
+		break;
+	case emulated_pad_settings_dialog::pad_type::guncon3:
+		g_cfg_guncon3.from_default();
 		break;
 	}
 
@@ -326,6 +366,9 @@ void emulated_pad_settings_dialog::reset_config()
 				break;
 			case pad_type::ds3gem:
 				def_btn_id = ::at32(g_cfg_gem.players, player)->default_pad_button(static_cast<gem_btn>(data.toInt()));
+				break;
+			case pad_type::guncon3:
+				def_btn_id = ::at32(g_cfg_guncon3.players, player)->default_pad_button(static_cast<guncon3_btn>(data.toInt()));
 				break;
 			}
 
