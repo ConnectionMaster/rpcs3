@@ -51,6 +51,8 @@ void raw_mouse::reload_config()
 	{
 		if (const auto& player = ::at32(g_cfg_raw_mouse.players, m_index))
 		{
+			input_log.notice("Raw mouse config for player %d=\n%s", m_index, player->to_string());
+
 			m_mouse_acceleration = static_cast<float>(player->mouse_acceleration.get()) / 100.0f;
 
 			m_buttons[CELL_MOUSE_BUTTON_1] = get_mouse_button(player->mouse_button_1);
@@ -555,6 +557,12 @@ std::map<void*, raw_mouse> raw_mouse_handler::enumerate_devices(u32 max_connect)
 #ifdef _WIN32
 void raw_mouse_handler::handle_native_event(const MSG& msg)
 {
+	if (m_info.max_connect == 0)
+	{
+		// Not initialized
+		return;
+	}
+
 	if (msg.message != WM_INPUT)
 	{
 		return;
